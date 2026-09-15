@@ -1,0 +1,2 @@
+# LANGUAGE python
+# Set VARIABLEs here to allow variation in your plugin
