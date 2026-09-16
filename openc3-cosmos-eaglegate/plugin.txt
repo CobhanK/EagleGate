@@ -1,2 +1,8 @@
 # LANGUAGE python
 # Set VARIABLEs here to allow variation in your plugin
+VARIABLE hello_target_name HELLO
+
+TARGET HELLO <%= hello_target_name %>
+INTERFACE <%= hello_target_name %>_INT simulated_target_interface.py hello_sim.py
+# USING Simulated_target_interface removes hardware -> change when in dev
+MAP_TARGET <%= hello_target_name %>
