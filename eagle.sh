@@ -9,10 +9,10 @@ SRC="$SCRIPT_DIR/openc3-cosmos-eaglegate"
 DEST_PARENT="$PARENT_DIR/cosmos"
 DEST="$DEST_PARENT/openc3-cosmos-eaglegate"
 
-echo $SCRIPT_DIR
-echo $SRC
-echo $DEST_PARENT
-echo $DEST
+# echo $SCRIPT_DIR
+# echo $SRC
+# echo $DEST_PARENT
+# echo $DEST
 
 if [[ ! -d "$SRC" ]]; then
     echo "Error: openc3-cosmos-eaglegate not found next to this script ($SRC)" >&2
