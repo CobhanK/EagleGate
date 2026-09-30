@@ -31,7 +31,7 @@ case "${1:-}" in
         cp -R "$SRC" "$DEST"
         echo "Copied $DEST into $DEST_PARENT"
         cd $DEST
-        ../openc3.sh cli rake build VERSION=1.0.0
+        ../openc3.sh cli rake build VERSION=1.0.1
         ;;
     clean)
         if [[ -d "$DEST" ]]; then
@@ -41,10 +41,29 @@ case "${1:-}" in
             echo "Nothing to clean: $DEST does not exist"
         fi
         ;;
+    run)
+        if [[ -d "$DEST" ]]; then
+            echo "Starting Cosmos"
+            cd $DEST
+            ../openc3.sh run
+        else
+            echo "Nothing to start: $DEST_PARENT does not exist"
+        fi
+        ;;
+    stop)
+        if [[ -d "$DEST" ]]; then
+            echo "Stopping Cosmos"
+            cd $DEST
+            ../openc3.sh stop
+        else
+            echo "Nothing to stop: $DEST_PARENT does not exist"
+        fi
+        ;;
     help)
         echo "Assuming cosmos is in the same folder as EagleGate:"
         echo "build : copies eaglegate into cosmos folder (deletes if exists there already)"
         echo "clean : removes eaglegate from cosmos folder"
+        echo "run|stop : starts or stops openc3 cosmos containers on local"  
     ;;
     *)
         echo "Usage: $0 {build|clean|help}" >&2

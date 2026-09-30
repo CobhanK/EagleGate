@@ -1,8 +1,24 @@
-TELEMETRY EAGLEGATE STATUS BIG_ENDIAN "Telemetry description"
-  # Keyword      Name  BitSize Type   ID Description
-  APPEND_ID_ITEM ID    16      INT    1  "Identifier"
-  APPEND_ITEM    VALUE 32      FLOAT     "Value"
-  APPEND_ITEM    BOOL  8       UINT      "Boolean"
+TELEMETRY EAGLEGATE HK_STATUS BIG_ENDIAN "Housekeeping status (APID 2)"
+#Keyword    Name           BitSize Type ID Description
+  APPEND_ITEM    CCSDS_VERSION    3 UINT   "CCSDS version (0)"
+  APPEND_ITEM    CCSDS_TYPE       1 UINT   "Packet type (0 = telemetry)"
+  APPEND_ITEM    CCSDS_SHF        1 UINT   "Secondary header flag"
+  APPEND_ID_ITEM CCSDS_APID      11 UINT 2 "Application process ID"
+  APPEND_ITEM    CCSDS_SEQFLAGS   2 UINT   "Sequence flags"
+  APPEND_ITEM    CCSDS_SEQCOUNT  14 UINT   "Sequence count"
+  APPEND_ITEM    CCSDS_LENGTH    16 UINT   "Payload length - 1"
+  # Payload: replace with what the device actually sends
+  APPEND_ITEM    VALUE           32 FLOAT  "Value"
+  APPEND_ITEM    BOOL             8 UINT   "Boolean"
     STATE FALSE 0
     STATE TRUE 1
-  APPEND_ITEM    LABEL 0       STRING    "The label to apply"
+
+TELEMETRY EAGLEGATE STATUS_3 BIG_ENDIAN "Second packet (APID 3)"
+  APPEND_ITEM    CCSDS_VERSION    3 UINT   "CCSDS version (0)"
+  APPEND_ITEM    CCSDS_TYPE       1 UINT   "Packet type (0 = telemetry)"
+  APPEND_ITEM    CCSDS_SHF        1 UINT   "Secondary header flag"
+  APPEND_ID_ITEM CCSDS_APID      11 UINT 3 "Application process ID"
+  APPEND_ITEM    CCSDS_SEQFLAGS   2 UINT   "Sequence flags"
+  APPEND_ITEM    CCSDS_SEQCOUNT  14 UINT   "Sequence count"
+  APPEND_ITEM    CCSDS_LENGTH    16 UINT   "Payload length - 1"
+  APPEND_ITEM    VALUE           32 FLOAT  "Value"

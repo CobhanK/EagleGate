@@ -19,3 +19,4 @@ Application Firewall Plugin for OpenC3 COSMOS that protects the satellite downli
 - ./EagleGate/eagle.sh clean will remove from cosmos dirrectory
 1. Navigate to Plugins in Cosmos Admin Dashboard
 1. Add Plugin from file -> select the new .gem file in openc3-cosmos-eaglegate
+

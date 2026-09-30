@@ -1,0 +1,3 @@
+openc3==7.4.1
+pytest
+hypothesis
