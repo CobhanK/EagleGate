@@ -3,15 +3,15 @@ fake TCP connection and fake rules storage. No Docker."""
 import pytest
 from hypothesis import settings, given, strategies as st
 
-from conftest import ccsds, rules_json, shipped_rules_text
+from conftest import PLUGIN_TXT, ccsds, rules_json, shipped_rules_text
 from eaglegate_firewall_protocol import EaglegateFirewallProtocol
-from eaglegate_rules import parse_header
+from eaglegate_ccsds_header import CcsdsHeader
 from openc3.interfaces.interface import Interface
 from openc3.top_level import get_class_from_module
 from openc3.utilities.string import filename_to_class_name, filename_to_module
 
 # Exactly the strings plugin.txt passes after ERB substitution
-PLUGIN_ARGS = ["32", "16", "7", "1", "BIG_ENDIAN", "1024", "EAGLEGATE/rules/firewall_rules.json"]
+PLUGIN_ARGS = ["1024", "EAGLEGATE/rules/firewall_rules.json"]
 PROTOCOL_FILE = "eaglegate_firewall_protocol.py"
 
 
@@ -64,7 +64,7 @@ def read_all(iface):
 
 
 def apids(packets):
-    return [parse_header(p).apid for p in packets]
+    return [CcsdsHeader.from_bytes(p).apid for p in packets]
 
 
 # ---- configuration ----
@@ -72,6 +72,16 @@ def apids(packets):
 def test_cosmos_can_load_class_from_filename():
     cls = get_class_from_module(filename_to_module(PROTOCOL_FILE), filename_to_class_name(PROTOCOL_FILE))
     assert cls is EaglegateFirewallProtocol
+
+
+def test_plugin_txt_protocol_line_matches_this_class():
+    """plugin.txt must name this file and pass exactly the arguments the tests use."""
+    with open(PLUGIN_TXT) as f:
+        line = next(l for l in f if l.strip().startswith("PROTOCOL READ"))
+    line = line.replace("<%= fw_max_length %>", "1024").replace("<%= eaglegate_target_name %>", "EAGLEGATE")
+    words = line.split()
+    assert words[2] == PROTOCOL_FILE
+    assert words[3:] == PLUGIN_ARGS
 
 
 def test_reads_rules_through_cosmos_target_file(monkeypatch):
@@ -208,7 +218,7 @@ def test_many_denied_packets_do_not_delay_the_next_allowed_one():
 def test_fuzz_random_chunks_never_crash_or_leak(chunks):
     iface, _, _ = build(chunks)
     for pkt in read_all(iface):  # any exception here would disconnect COSMOS
-        h = parse_header(pkt)
+        h = CcsdsHeader.from_bytes(pkt)
         assert h.version == 0 and h.packet_type == 0 and h.apid in (2, 3)
         assert len(pkt) == h.total_length <= 1024
 
