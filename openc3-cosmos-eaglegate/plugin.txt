@@ -5,9 +5,9 @@ VARIABLE eaglegate_target_name EAGLEGATE
 #VARIABLE host 127.0.0.1 
 VARIABLE host host.docker.internal
 VARIABLE port 8080
+# Hard ceiling on total CCSDS packet size in bytes. Enforced before the rules,
+# and deliberately NOT editable from the rules file.
 VARIABLE fw_max_length 1024
-# Comma-separated APIDs with NO spaces. Empty = allow all APIDs.
-VARIABLE fw_allowed_ids 0x02,0x03
 
 TARGET EAGLEGATE <%= eaglegate_target_name %>
   # Decom tlm and cmd data in the time-series database is kept forever by default.
@@ -15,9 +15,13 @@ TARGET EAGLEGATE <%= eaglegate_target_name %>
   # CMD_DECOM_RETAIN_TIME 30d
   # TLM_DECOM_RETAIN_TIME 30d
 
-INTERFACE <%= eaglegate_target_name %>_INT openc3/interfaces/tcpip_client_interface.py <%= host %> <%= port %> <%= port %> 10.0 None LENGTH 32 16 7
+INTERFACE <%= eaglegate_target_name %>_INT openc3/interfaces/tcpip_client_interface.py <%= host %> <%= port %> <%= port %> 10.0 None
   MAP_TARGET <%= eaglegate_target_name %>
-  PROTOCOL READ eaglegate.py <%= fw_max_length %> <%= fw_allowed_ids %> TRUE
+  # No LENGTH on the INTERFACE line: the firewall protocol does the CCSDS framing
+  # itself, so it can check each header before buffering the packet body.
+  # Arguments: size ceiling, rules file. Change rules at runtime with the
+  # EAGLEGATE/procedures/apply_firewall_rules.py procedure.
+  PROTOCOL READ eaglegate_firewall_protocol.py <%= fw_max_length %> <%= eaglegate_target_name %>/rules/firewall_rules.json
 
 #Initial Skeleton
 #INTERFACE <%= eaglegate_target_name %>_INT openc3/interfaces/tcpip_client_interface.py host.docker.internal 8080 8081 10.0 None BURST

@@ -11,6 +11,7 @@ import pytest  # noqa: E402
 ROOT = os.path.join(os.path.dirname(__file__), "..")
 LIB = os.path.join(ROOT, "targets", "EAGLEGATE", "lib")
 RULES_PATH = os.path.join(ROOT, "targets", "EAGLEGATE", "rules", "firewall_rules.json")
+PLUGIN_TXT = os.path.join(ROOT, "plugin.txt")
 PROCEDURE_PATH = os.path.join(ROOT, "targets", "EAGLEGATE", "procedures", "apply_firewall_rules.py")
 
 # Make the target's lib/ importable, the same way COSMOS does at runtime

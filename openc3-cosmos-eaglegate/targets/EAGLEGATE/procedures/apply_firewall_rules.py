@@ -1,16 +1,17 @@
-# EAGLEGATE: validate the firewall rules file and apply it to the running interface.
+# EAGLEGATE: apply the edited firewall rules file to the running interface.
 #
 # How to change the firewall rules:
 #   1. Edit EAGLEGATE/rules/firewall_rules.json through COSMOS (for example open
 #      it in Script Runner, or write it from a script with put_target_file),
 #      bump "version", and save. Your edit is stored separately from the
 #      plugin's original, so it survives plugin upgrades.
-#   2. Run this procedure. It validates first, and only then tells the interface
-#      to reload. It finishes by confirming the new version is actually active.
+#   2. Run this procedure. It asks the interface to reload the file and then
+#      confirms the new rules are active, or prints why the interface refused
+#      them. An invalid file never replaces the rules that are running.
 #
 # Needs the "system_set" permission (same as other interface control commands).
-
-load_utility("EAGLEGATE/lib/eaglegate_rules.py")  # compile_ruleset, RulesError
+import hashlib
+import json
 
 TARGET = "EAGLEGATE"  # change if the target was renamed at install time
 INTERFACE = f"{TARGET}_INT"
@@ -19,46 +20,61 @@ PROTOCOL_CLASS = "EaglegateFirewallProtocol"
 TIMEOUT_SECONDS = 10
 
 
-def firewall_state():
-    details = interface_details(INTERFACE)
-    for proto in details.get("read_protocols", []):
-        if proto.get("name") == PROTOCOL_CLASS:
-            return proto["firewall"]
-    raise RuntimeError(f"{INTERFACE} has no {PROTOCOL_CLASS} read protocol")
-
-
-def apply_firewall_rules():
-    # 1. Validate with the same engine the interface uses
+def read_rules_file():
+    """Step 1: read the file and fingerprint it, so we can tell when it is active."""
     file = get_target_file(RULES_FILE)
     if file is None:
         raise RuntimeError(f"{RULES_FILE} not found")
     text = file.read()
-    try:
-        rules = compile_ruleset(text)
-    except RulesError as error:
-        raise RuntimeError(f"Rules file is invalid, nothing was changed:\n  {error}")
+    if isinstance(text, bytes):
+        text = text.decode("utf-8")
+    return text, hashlib.sha256(text.encode("utf-8")).hexdigest()
 
-    before = firewall_state()
-    print(f"Active: version {before['rules']['version']} | New: version {rules.version}, "
-          f"{len(rules.rules)} active rules, default {rules.default_action}")
-    if rules.version <= before["rules"]["version"] and rules.sha256 != before["rules"]["sha256"]:
+
+def firewall_state():
+    """The "firewall" section the protocol adds to interface_details()."""
+    details = interface_details(INTERFACE)
+    for protocol in details.get("read_protocols", []):
+        if protocol.get("name") == PROTOCOL_CLASS:
+            return protocol["firewall"]
+    raise RuntimeError(f"{INTERFACE} has no {PROTOCOL_CLASS} read protocol")
+
+
+def warn_if_version_not_bumped(text, sha256, active):
+    try:
+        version = json.loads(text).get("version")
+    except Exception:
+        return  # the interface will report what is wrong with the file
+    print(f"Active: version {active['version']} | File: version {version}")
+    if sha256 != active["sha256"] and isinstance(version, int) and version <= active["version"]:
         print("WARNING: content changed but 'version' was not increased")
 
-    # 2. Tell the running interface to reload (fire-and-forget in COSMOS)
-    interface_protocol_cmd(INTERFACE, "RELOAD_RULES", read_write="READ")
 
-    # 3. Confirm it took effect
+def wait_until_active(sha256, before):
+    """Step 3: interface_protocol_cmd is fire-and-forget, so poll for the result."""
     waited = 0.0
     while waited < TIMEOUT_SECONDS:
         state = firewall_state()
-        if state["rules"]["sha256"] == rules.sha256:
-            print(f"SUCCESS: rules version {rules.version} active on {INTERFACE}")
+        if state["rules"]["sha256"] == sha256:
             return state
         if state["rules_error_at"] and state["rules_error_at"] != before["rules_error_at"]:
-            raise RuntimeError(f"Interface rejected the rules: {state['rules_error']}")
+            raise RuntimeError(f"Interface rejected the rules, nothing was changed:\n  {state['rules_error']}")
         wait(0.5)
         waited += 0.5
     raise RuntimeError(f"Timed out after {TIMEOUT_SECONDS}s; check the {INTERFACE} log in Admin")
+
+
+def apply_firewall_rules():
+    text, sha256 = read_rules_file()
+    before = firewall_state()
+    warn_if_version_not_bumped(text, sha256, before["rules"])
+
+    # Step 2: ask the interface to reload (it validates the file itself)
+    interface_protocol_cmd(INTERFACE, "RELOAD_RULES", read_write="READ")
+
+    state = wait_until_active(sha256, before)
+    print(f"SUCCESS: rules version {state['rules']['version']} active on {INTERFACE}")
+    return state
 
 
 apply_firewall_rules()

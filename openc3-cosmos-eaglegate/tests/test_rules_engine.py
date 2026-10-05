@@ -2,17 +2,18 @@
 import pytest
 
 from conftest import ccsds, rules_json, shipped_rules_text
-from eaglegate_rules import RulesError, compile_ruleset
+from eaglegate_rules_error import RulesError
+from eaglegate_rules_parser import parse_rules
 
 
 def evaluate(rules, packet, default_action="DENY"):
-    return compile_ruleset(rules_json(rules, default_action)).evaluate(packet)
+    return parse_rules(rules_json(rules, default_action)).evaluate(packet)
 
 
 # ---- the shipped rules file ----
 
 def test_shipped_rules_file_is_valid_and_matches_old_policy():
-    rs = compile_ruleset(shipped_rules_text())
+    rs = parse_rules(shipped_rules_text())
     assert rs.default_action == "DENY"
     assert [r.id for r in rs.rules] == ["deny-commands-on-tlm-link", "allow-housekeeping"]  # examples disabled
     assert rs.evaluate(ccsds(2))[0] == "ALLOW"
@@ -61,7 +62,7 @@ def test_disabled_rules_are_skipped():
 
 
 def test_hit_counters():
-    rs = compile_ruleset(rules_json([{"id": "a", "action": "ALLOW", "match": {"apid": [1]}}]))
+    rs = parse_rules(rules_json([{"id": "a", "action": "ALLOW", "match": {"apid": [1]}}]))
     for apid in (1, 1, 2):
         rs.evaluate(ccsds(apid))
     assert rs.summary()["rule_hits"] == {"a": 2}
@@ -69,9 +70,9 @@ def test_hit_counters():
 
 
 def test_sha_identifies_exact_content():
-    a = compile_ruleset(rules_json([], version=1))
-    b = compile_ruleset(rules_json([], version=1))
-    c = compile_ruleset(rules_json([], version=2))
+    a = parse_rules(rules_json([], version=1))
+    b = parse_rules(rules_json([], version=1))
+    c = parse_rules(rules_json([], version=2))
     assert a.sha256 == b.sha256 != c.sha256
 
 
@@ -87,7 +88,7 @@ def test_sha_identifies_exact_content():
 ])
 def test_top_level_errors(text, message):
     with pytest.raises(RulesError, match=message):
-        compile_ruleset(text)
+        parse_rules(text)
 
 
 @pytest.mark.parametrize("rule, message", [
@@ -107,17 +108,17 @@ def test_top_level_errors(text, message):
 ])
 def test_rule_errors(rule, message):
     with pytest.raises(RulesError, match=message):
-        compile_ruleset(rules_json([rule]))
+        parse_rules(rules_json([rule]))
 
 
 def test_duplicate_ids_rejected():
     rule = {"id": "same", "action": "DENY", "match": {}}
     with pytest.raises(RulesError, match="duplicate"):
-        compile_ruleset(rules_json([rule, rule]))
+        parse_rules(rules_json([rule, rule]))
 
 
 def test_error_messages_name_the_rule():
     rules = [{"id": "ok", "action": "ALLOW", "match": {}},
              {"id": "broken-one", "action": "ALLOW", "match": {"apid": [99999]}}]
     with pytest.raises(RulesError, match="rule 'broken-one'"):
-        compile_ruleset(rules_json(rules))
+        parse_rules(rules_json(rules))

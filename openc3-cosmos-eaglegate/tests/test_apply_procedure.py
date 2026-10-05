@@ -8,7 +8,7 @@ import json
 
 import pytest
 
-from conftest import PROCEDURE_PATH, LIB, rules_json, shipped_rules_text
+from conftest import PROCEDURE_PATH, rules_json, shipped_rules_text
 from test_firewall_protocol import build
 from openc3.utilities.json import JsonDecoder, JsonEncoder
 
@@ -29,10 +29,6 @@ class FakeCosmos:
     def namespace(self):
         ns = {}
 
-        def load_utility(path):
-            with open(f"{LIB}/{path.split('/')[-1]}") as f:
-                exec(f.read(), ns)
-
         def get_target_file(path):
             text = self.script_view if self.script_view is not None else self.store.text
             return io.BytesIO(text.encode() if isinstance(text, str) else text)
@@ -50,7 +46,7 @@ class FakeCosmos:
             while self.pending:
                 self.pending.pop(0)()
 
-        ns.update(load_utility=load_utility, get_target_file=get_target_file,
+        ns.update(get_target_file=get_target_file,
                   interface_protocol_cmd=interface_protocol_cmd,
                   interface_details=interface_details, wait=wait,
                   print=lambda *a: self.output.append(" ".join(map(str, a))))
@@ -70,19 +66,18 @@ def test_applies_new_rules_and_confirms():
     assert any("SUCCESS: rules version 2 active" in line for line in cosmos.output)
 
 
-def test_invalid_file_is_rejected_before_touching_the_interface():
+def test_invalid_file_is_reported_and_running_rules_kept():
     iface, proto, store = build()
     store.text = rules_json([{"id": "x", "action": "ALOW", "match": {}}], version=2)
     cosmos = FakeCosmos(iface, store)
-    with pytest.raises(RuntimeError, match="nothing was changed"):
+    with pytest.raises(RuntimeError, match="nothing was changed:\n.*action must be one of"):
         cosmos.run_procedure()
-    assert cosmos.reload_requests == 0
     assert proto.ruleset.version == 1
 
 
 def test_reports_when_interface_rejects_the_reload():
-    """File passes the script's check but the interface loads something broken
-    (e.g. edited again in between). The procedure must say so, not claim success."""
+    """The file is edited again between the procedure reading it and the
+    interface loading it. The procedure must report the error, not claim success."""
     iface, proto, store = build()
     cosmos = FakeCosmos(iface, store, script_view=V2)
     store.text = "{broken"
