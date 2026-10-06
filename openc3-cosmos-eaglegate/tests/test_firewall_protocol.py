@@ -191,24 +191,58 @@ ALLOW_ALL = rules_json([{"id": "allow-all", "action": "ALLOW", "match": {}}], ve
 
 
 def test_hostile_length_rejected_even_with_allow_all_rules():
-    iface, _, _ = build([ccsds(2, b"", length_field=0xFFFF), ccsds(3)], rules=ALLOW_ALL)
-    assert apids(read_all(iface)) == [3]
+    iface, _, _ = build([ccsds(2), ccsds(2, b"", length_field=0xFFFF), ccsds(3)], rules=ALLOW_ALL)
+    assert apids(read_all(iface)) == [2, 3]
 
 
 def test_bad_version_rejected_even_with_allow_all_rules():
     garbage = ccsds(2, version=5) + ccsds(2)
-    iface, proto, _ = build([garbage, ccsds(3)], rules=ALLOW_ALL)
-    assert apids(read_all(iface)) == [3]
+    iface, proto, _ = build([ccsds(2), garbage, ccsds(3)], rules=ALLOW_ALL)
+    assert apids(read_all(iface)) == [2, 3]
     assert proto.discarded_bytes == len(garbage)
 
 
 # ---- no delay behind denied packets ----
 
 def test_many_denied_packets_do_not_delay_the_next_allowed_one():
-    stream = b"".join(ccsds(0x10 + i) for i in range(50)) + ccsds(2)
+    stream = ccsds(3) + b"".join(ccsds(0x10 + i) for i in range(50)) + ccsds(2)
     iface, proto, _ = build([stream])
-    assert apids(read_all(iface)) == [2]
+    assert apids(read_all(iface)) == [3, 2]
     assert proto.rejected == 50
+
+
+# ---- a rejected first packet makes the whole connection untrusted ----
+
+def test_rejected_first_packet_denies_rest_of_connection(log):
+    first = ccsds(0x100)  # not allowed by the shipped rules
+    iface, proto, _ = build([first + ccsds(2), ccsds(3)])  # same chunk, then a later one
+    assert read_all(iface) == []
+    assert proto.connection_untrusted
+    assert proto.rejected == 1  # later packets are discarded as bytes, not judged
+    assert proto.discarded_bytes == len(ccsds(2)) + len(ccsds(3))
+    assert iface.details()["read_protocols"][0]["firewall"]["connection_untrusted"] is True
+    assert sum("until the interface reconnects" in m for _, m in log) == 1  # logged once
+
+
+def test_malformed_first_packet_denies_rest_of_connection():
+    iface, proto, _ = build([ccsds(2, version=5), ccsds(2), ccsds(3)], rules=ALLOW_ALL)
+    assert read_all(iface) == []
+    assert proto.connection_untrusted
+
+
+def test_reconnect_clears_untrusted_connection():
+    iface, proto, _ = build([ccsds(0x100), ccsds(2)])
+    assert read_all(iface) == []
+    iface.chunks = [ccsds(2), ccsds(3)]
+    iface.connect()  # COSMOS reconnecting after the link drops
+    assert not proto.connection_untrusted
+    assert apids(read_all(iface)) == [2, 3]
+
+
+def test_rejection_after_allowed_first_packet_only_affects_that_packet():
+    iface, proto, _ = build([ccsds(2) + ccsds(0x100) + ccsds(3)])
+    assert apids(read_all(iface)) == [2, 3]
+    assert not proto.connection_untrusted
 
 
 # ---- fuzz ----
@@ -231,4 +265,6 @@ def test_fuzz_valid_streams_any_chunking(packets, chunk_size):
     stream = b"".join(ccsds(apid, payload) for apid, payload in packets)
     chunks = [stream[i:i + chunk_size] for i in range(0, len(stream), chunk_size)]
     iface, _, _ = build(chunks)
-    assert read_all(iface) == [ccsds(a, p) for a, p in packets if a in (2, 3)]
+    first_allowed = packets[0][0] in (2, 3)  # a rejected first packet blocks the connection
+    expected = [ccsds(a, p) for a, p in packets if a in (2, 3)] if first_allowed else []
+    assert read_all(iface) == expected
