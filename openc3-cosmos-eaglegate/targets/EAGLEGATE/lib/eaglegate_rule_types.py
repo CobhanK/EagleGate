@@ -86,8 +86,10 @@ class SequenceRule(Rule):
       }
 
     Counts are tracked per APID and wrap from 16383 to 0. The first packet of each
-    APID after the rules are (re)loaded sets the starting point, so reloading the
-    rules is also how operators recover after the spacecraft resets its counters.
+    APID after a CHANGED rules file is applied sets the starting point. Reconnecting
+    or re-applying the same file keeps the counts (so a dropped link cannot be used
+    to replay a packet); after the spacecraft resets its counters, bump the rules
+    "version" and apply the file to start fresh.
     """
 
     TYPE = "sequence"

@@ -31,7 +31,9 @@ How the rules get loaded (on connect, and on the RELOAD_RULES command):
   (eaglegate_rules_error.RulesError if the file is invalid; the checks
   themselves live in eaglegate_validate.py)
 
-  * reloading also resets what the sequence and rate rules remember
+  * loading an UNCHANGED file (same sha256) keeps the running rule set, so
+    reconnects never reset what the sequence and rate rules remember; a
+    changed file starts them fresh
 
   * an invalid file never replaces a working rule set (last known good is kept);
     if no valid rules were ever loaded, everything is denied (fail closed)
@@ -198,12 +200,16 @@ class EaglegateFirewallProtocol(LengthProtocol):
                 + (" (DENY ALL)" if self.ruleset.version < 0 else "")
             )
             return False
+        self.rules_error = None
+        self.rules_error_at = None
+        if new_ruleset.sha256 == self.ruleset.sha256:
+            # Same file: keep the running set, so what the sequence and rate rules
+            # remember survives reconnects (a reset would let one replay through)
+            return True
         old_version = self.ruleset.version
         # A single assignment: read_data sees the old or the new set, never a mix
         self.ruleset = new_ruleset
         self.rules_loaded_at = _now()
-        self.rules_error = None
-        self.rules_error_at = None
         Logger.info(
             f"{self._name()} firewall: rules version {old_version} -> {new_ruleset.version} "
             f"({len(new_ruleset.rules)} active rules, sha256 {new_ruleset.sha256[:12]})"

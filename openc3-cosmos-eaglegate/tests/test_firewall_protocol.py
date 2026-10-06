@@ -3,7 +3,8 @@ fake TCP connection and fake rules storage. No Docker."""
 import pytest
 from hypothesis import settings, given, strategies as st
 
-from conftest import PLUGIN_TXT, ccsds, rules_json, shipped_rules_text
+from conftest import (HK_STATUS_LENGTH, PLUGIN_TXT, STATUS_3_LENGTH, ccsds, hk_status,
+                      rules_json, shipped_rules_text, status_3)
 from eaglegate_firewall_protocol import EaglegateFirewallProtocol
 from eaglegate_ccsds_header import CcsdsHeader
 from openc3.interfaces.interface import Interface
@@ -104,20 +105,20 @@ def test_reads_rules_through_cosmos_target_file(monkeypatch):
 # ---- rules loaded on connect ----
 
 def test_rules_loaded_on_connect():
-    iface, proto, _ = build([ccsds(2) + ccsds(0x100) + ccsds(3)])
+    iface, proto, _ = build([hk_status() + ccsds(0x100) + status_3()])
     assert proto.ruleset.version == 1
     assert apids(read_all(iface)) == [2, 3]
 
 
 def test_no_valid_rules_at_startup_denies_everything(log):
-    iface, proto, _ = build([ccsds(2) + ccsds(3)], rules="{broken")
+    iface, proto, _ = build([hk_status() + status_3()], rules="{broken")
     assert read_all(iface) == []
     assert proto.ruleset.version == -1
     assert any(level == "ERROR" and "DENY ALL" in msg for level, msg in log)
 
 
 def test_missing_rules_file_at_startup_denies_everything():
-    iface, proto, _ = build([ccsds(2)], connect=False)
+    iface, proto, _ = build([hk_status()], connect=False)
     proto.read_rules_text = FakeRulesStore(None).read
     iface.connect()
     assert read_all(iface) == []
@@ -126,7 +127,7 @@ def test_missing_rules_file_at_startup_denies_everything():
 def test_reconnect_with_broken_file_keeps_last_known_good():
     """Interfaces reconnect after link drops; a broken file then must not open
     (or close) the firewall. The protocol object, and its rules, survive reconnects."""
-    iface, proto, store = build([ccsds(2)])
+    iface, proto, store = build([hk_status()])
     store.text = None  # file deleted / unreadable
     iface.connect()
     assert proto.ruleset.version == 1
@@ -136,7 +137,7 @@ def test_reconnect_with_broken_file_keeps_last_known_good():
 # ---- hot reload ----
 
 def test_reload_swaps_rules_while_streaming():
-    iface, proto, store = build([ccsds(2), ccsds(0x100)], connect=True)
+    iface, proto, store = build([hk_status(), ccsds(0x100)], connect=True)
     assert apids([iface.read().buffer]) == [2]
     store.text = rules_json([{"id": "allow-all", "action": "ALLOW", "match": {}}], version=2)
     iface.protocol_cmd("RELOAD_RULES", read_write="READ")  # what interface_protocol_cmd triggers
@@ -145,7 +146,7 @@ def test_reload_swaps_rules_while_streaming():
 
 
 def test_invalid_reload_keeps_last_known_good(log):
-    iface, proto, store = build([ccsds(2), ccsds(3)])
+    iface, proto, store = build([hk_status(), status_3()])
     store.text = rules_json([{"id": "x", "action": "ALLOW", "match": {"apids": [1]}}], version=2)  # typo
     iface.protocol_cmd("RELOAD_RULES", read_write="READ")
     assert proto.ruleset.version == 1
@@ -169,18 +170,18 @@ def test_unknown_protocol_cmd_not_handled():
 
 
 def test_details_report_active_rules_and_counters():
-    iface, proto, _ = build([ccsds(2) + ccsds(0x100)])
+    iface, proto, _ = build([hk_status() + ccsds(0x100)])
     read_all(iface)
     fw = iface.details()["read_protocols"][0]["firewall"]
     assert fw["rules"]["version"] == 1
     assert fw["rules"]["sha256"] == proto.ruleset.sha256
-    assert fw["rules"]["rule_hits"]["allow-housekeeping"] == 1
+    assert fw["rules"]["rule_hits"]["allow-hk-status"] == 1
     assert fw["rules"]["default_hits"] == 1
     assert fw["rejected"] == 1 and fw["rules_error"] is None
 
 
 def test_reject_log_names_the_rule(log):
-    iface, _, _ = build([ccsds(2, packet_type=1) + ccsds(3)])
+    iface, _, _ = build([ccsds(2, packet_type=1) + status_3()])
     read_all(iface)
     assert any("denied by rule 'deny-commands-on-tlm-link' (rules v1)" in m for _, m in log)
 
@@ -191,13 +192,13 @@ ALLOW_ALL = rules_json([{"id": "allow-all", "action": "ALLOW", "match": {}}], ve
 
 
 def test_hostile_length_rejected_even_with_allow_all_rules():
-    iface, _, _ = build([ccsds(2), ccsds(2, b"", length_field=0xFFFF), ccsds(3)], rules=ALLOW_ALL)
+    iface, _, _ = build([hk_status(), ccsds(2, b"", length_field=0xFFFF), status_3()], rules=ALLOW_ALL)
     assert apids(read_all(iface)) == [2, 3]
 
 
 def test_bad_version_rejected_even_with_allow_all_rules():
-    garbage = ccsds(2, version=5) + ccsds(2)
-    iface, proto, _ = build([ccsds(2), garbage, ccsds(3)], rules=ALLOW_ALL)
+    garbage = ccsds(2, version=5) + hk_status()
+    iface, proto, _ = build([hk_status(), garbage, status_3()], rules=ALLOW_ALL)
     assert apids(read_all(iface)) == [2, 3]
     assert proto.discarded_bytes == len(garbage)
 
@@ -205,7 +206,7 @@ def test_bad_version_rejected_even_with_allow_all_rules():
 # ---- no delay behind denied packets ----
 
 def test_many_denied_packets_do_not_delay_the_next_allowed_one():
-    stream = ccsds(3) + b"".join(ccsds(0x10 + i) for i in range(50)) + ccsds(2)
+    stream = status_3() + b"".join(ccsds(0x10 + i) for i in range(50)) + hk_status()
     iface, proto, _ = build([stream])
     assert apids(read_all(iface)) == [3, 2]
     assert proto.rejected == 50
@@ -215,34 +216,117 @@ def test_many_denied_packets_do_not_delay_the_next_allowed_one():
 
 def test_rejected_first_packet_denies_rest_of_connection(log):
     first = ccsds(0x100)  # not allowed by the shipped rules
-    iface, proto, _ = build([first + ccsds(2), ccsds(3)])  # same chunk, then a later one
+    iface, proto, _ = build([first + hk_status(), status_3()])  # same chunk, then a later one
     assert read_all(iface) == []
     assert proto.connection_untrusted
     assert proto.rejected == 1  # later packets are discarded as bytes, not judged
-    assert proto.discarded_bytes == len(ccsds(2)) + len(ccsds(3))
+    assert proto.discarded_bytes == len(hk_status()) + len(status_3())
     assert iface.details()["read_protocols"][0]["firewall"]["connection_untrusted"] is True
     assert sum("until the interface reconnects" in m for _, m in log) == 1  # logged once
 
 
 def test_malformed_first_packet_denies_rest_of_connection():
-    iface, proto, _ = build([ccsds(2, version=5), ccsds(2), ccsds(3)], rules=ALLOW_ALL)
+    iface, proto, _ = build([ccsds(2, version=5), hk_status(), status_3()], rules=ALLOW_ALL)
     assert read_all(iface) == []
     assert proto.connection_untrusted
 
 
 def test_reconnect_clears_untrusted_connection():
-    iface, proto, _ = build([ccsds(0x100), ccsds(2)])
+    iface, proto, _ = build([ccsds(0x100), hk_status()])
     assert read_all(iface) == []
-    iface.chunks = [ccsds(2), ccsds(3)]
+    iface.chunks = [hk_status(), status_3()]
     iface.connect()  # COSMOS reconnecting after the link drops
     assert not proto.connection_untrusted
     assert apids(read_all(iface)) == [2, 3]
 
 
+def test_broken_rules_at_startup_stay_untrusted_until_reconnect():
+    """Fixing the rules does not reopen the connection: the bytes dropped while
+    untrusted were never framed, so only a reconnect gives a clean start."""
+    iface, proto, store = build([hk_status()], rules="{broken")
+    assert read_all(iface) == []
+    store.text = ALLOW_ALL
+    iface.protocol_cmd("RELOAD_RULES", read_write="READ")
+    iface.chunks = [hk_status()]
+    assert read_all(iface) == [] and proto.connection_untrusted
+    iface.chunks = [hk_status()]
+    iface.connect()
+    assert apids(read_all(iface)) == [2]
+
+
 def test_rejection_after_allowed_first_packet_only_affects_that_packet():
-    iface, proto, _ = build([ccsds(2) + ccsds(0x100) + ccsds(3)])
+    iface, proto, _ = build([hk_status() + ccsds(0x100) + status_3()])
     assert apids(read_all(iface)) == [2, 3]
     assert not proto.connection_untrusted
+
+
+# ---- rule errors and stateful rules inside the protocol ----
+
+def test_error_while_evaluating_denies_packet_and_keeps_running(log):
+    """An exception must deny the packet, never disconnect COSMOS or let it through."""
+    iface, proto, _ = build([hk_status() + hk_status() + status_3()])
+    real_evaluate = proto.ruleset.evaluate
+    calls = []
+
+    def evaluate_failing_on_second_packet(packet):
+        calls.append(packet)
+        if len(calls) == 2:
+            raise RuntimeError("boom")
+        return real_evaluate(packet)
+
+    proto.ruleset.evaluate = evaluate_failing_on_second_packet
+    assert apids(read_all(iface)) == [2, 3]  # the second packet is dropped, nothing else
+    assert any("denied by rule 'error: boom'" in m for _, m in log)
+
+
+SEQUENCE_RULES = rules_json([
+    {"id": "in-order", "type": "sequence", "action": "DENY", "match": {}},
+    {"id": "allow-all", "action": "ALLOW", "match": {}},
+])
+
+
+def test_reconnect_keeps_replay_protection():
+    """Reconnecting reloads the same rules file; that must not reset sequence memory."""
+    stream = ccsds(2, seq=5) + ccsds(2, seq=6)
+    iface, proto, _ = build([stream[:5], stream[5:]], rules=SEQUENCE_RULES)  # split mid-packet
+    assert [CcsdsHeader.from_bytes(p).seq_count for p in read_all(iface)] == [5, 6]
+    iface.chunks = [ccsds(2, seq=7), ccsds(2, seq=6)]  # next packet, then a replay
+    iface.connect()
+    assert [CcsdsHeader.from_bytes(p).seq_count for p in read_all(iface)] == [7]
+    assert proto.ruleset.rules[0].hits == 1
+
+
+def test_changed_rules_file_starts_sequence_memory_fresh():
+    """After the spacecraft resets its counters, applying a changed file recovers."""
+    iface, proto, store = build([ccsds(2, seq=100)], rules=SEQUENCE_RULES)
+    read_all(iface)
+    store.text = SEQUENCE_RULES.replace('"version": 1', '"version": 2')
+    iface.protocol_cmd("RELOAD_RULES", read_write="READ")
+    iface.chunks = [ccsds(2, seq=0)]  # counters restarted at 0
+    assert len(read_all(iface)) == 1
+
+
+def test_unchanged_reload_keeps_rule_set_and_clears_old_error():
+    _, proto, store = build()
+    running = proto.ruleset
+    store.text = "{broken"
+    proto.load_rules()
+    store.text = shipped_rules_text()
+    assert proto.load_rules()
+    assert proto.ruleset is running and proto.rules_error is None
+
+
+def test_missing_file_in_cosmos_storage_is_a_rules_error(monkeypatch):
+    class EmptyTargetFile:
+        @staticmethod
+        def body(scope, name):
+            return None
+
+    import openc3.utilities.target_file as tf
+    monkeypatch.setattr(tf, "TargetFile", EmptyTargetFile)
+    proto = EaglegateFirewallProtocol(*PLUGIN_ARGS, "TESTSCOPE")
+    assert not proto.load_rules()
+    assert "RulesError" in proto.rules_error and "not found" in proto.rules_error
 
 
 # ---- fuzz ----
@@ -250,21 +334,28 @@ def test_rejection_after_allowed_first_packet_only_affects_that_packet():
 @settings(max_examples=300, deadline=None)
 @given(st.lists(st.binary(min_size=1, max_size=200), min_size=1, max_size=6))
 def test_fuzz_random_chunks_never_crash_or_leak(chunks):
-    iface, _, _ = build(chunks)
+    # A valid first packet keeps the connection trusted, so the random bytes
+    # reach the framing and rules instead of just being discarded
+    iface, _, _ = build([hk_status()] + chunks)
     for pkt in read_all(iface):  # any exception here would disconnect COSMOS
         h = CcsdsHeader.from_bytes(pkt)
-        assert h.version == 0 and h.packet_type == 0 and h.apid in (2, 3)
-        assert len(pkt) == h.total_length <= 1024
+        assert h.version == 0 and h.packet_type == 0
+        assert len(pkt) == h.total_length == ALLOWED_LENGTH[h.apid]
+
+
+ALLOWED_LENGTH = {2: HK_STATUS_LENGTH, 3: STATUS_3_LENGTH}  # what the shipped rules allow
 
 
 @settings(max_examples=200, deadline=None)
-@given(st.lists(st.tuples(st.sampled_from([2, 3, 0x100]), st.binary(min_size=1, max_size=50)),
+@given(st.lists(st.tuples(st.sampled_from([2, 3, 0x100]), st.binary(min_size=3, max_size=6)),
                 min_size=1, max_size=10),
        st.integers(min_value=1, max_value=40))
 def test_fuzz_valid_streams_any_chunking(packets, chunk_size):
-    stream = b"".join(ccsds(apid, payload) for apid, payload in packets)
+    """Payloads of 3..6 bytes mix correctly sized housekeeping packets with wrong ones."""
+    packets = [ccsds(apid, payload) for apid, payload in packets]
+    stream = b"".join(packets)
     chunks = [stream[i:i + chunk_size] for i in range(0, len(stream), chunk_size)]
     iface, _, _ = build(chunks)
-    first_allowed = packets[0][0] in (2, 3)  # a rejected first packet blocks the connection
-    expected = [ccsds(a, p) for a, p in packets if a in (2, 3)] if first_allowed else []
-    assert read_all(iface) == expected
+    allowed = [p for p in packets if len(p) == ALLOWED_LENGTH.get(CcsdsHeader.from_bytes(p).apid)]
+    first_allowed = allowed[:1] == packets[:1]  # a rejected first packet blocks the connection
+    assert read_all(iface) == (allowed if first_allowed else [])

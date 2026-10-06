@@ -52,6 +52,19 @@ def ccsds(apid, payload=b"\x00", packet_type=0, sec_hdr=0, version=0, seq=0, len
             + length_field.to_bytes(2, "big") + payload)
 
 
+# Packets the shipped rules allow: exact sizes as defined in cmd_tlm/tlm.txt
+HK_STATUS_LENGTH = 11  # APID 2
+STATUS_3_LENGTH = 10   # APID 3
+
+
+def hk_status(**kwargs):
+    return ccsds(2, bytes(HK_STATUS_LENGTH - 6), **kwargs)
+
+
+def status_3(**kwargs):
+    return ccsds(3, bytes(STATUS_3_LENGTH - 6), **kwargs)
+
+
 def rules_json(rules, default_action="DENY", version=1, **extra):
     return json.dumps({"version": version, "default_action": default_action, "rules": rules, **extra})
 

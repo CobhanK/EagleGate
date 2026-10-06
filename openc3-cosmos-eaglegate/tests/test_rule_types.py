@@ -152,3 +152,21 @@ def test_bad_key_value_is_reported_without_the_key(monkeypatch):
 def test_disabled_rule_does_not_need_its_key():
     rule = check("authenticity", {"key_env": "NOT_SET_ANYWHERE"}) | {"enabled": False}
     assert parse_rules(rules_json([rule])).rules == []
+
+
+def test_key_that_is_not_hex_is_reported_without_the_key(monkeypatch):
+    monkeypatch.setenv("TEST_AUTH_KEY", "not-hex-" * 4)
+    with pytest.raises(RulesError, match="must hold the key as hex") as error:
+        parse_rules(rules_json([check("authenticity", {"key_env": "TEST_AUTH_KEY"})]))
+    assert "not-hex" not in str(error.value)
+
+
+@pytest.mark.parametrize("data_type, layout, inside, outside", [
+    ("UINT32", ">I", 4_000_000_000, 4_000_000_001),  # above the signed 32-bit range
+    ("INT8", ">b", -128, 127),
+    ("FLOAT64", ">d", 1e300, 1e301),
+])
+def test_range_reads_each_data_type(data_type, layout, inside, outside):
+    rs = ruleset(check("range", {"offset": 6, "data_type": data_type, "max": inside}))
+    assert rs.evaluate(ccsds(2, struct.pack(layout, inside)))[0] == "ALLOW"
+    assert rs.evaluate(ccsds(2, struct.pack(layout, outside)))[0] == "DENY"

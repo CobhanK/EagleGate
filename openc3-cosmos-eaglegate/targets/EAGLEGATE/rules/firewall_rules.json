@@ -13,7 +13,7 @@
     },
     {
       "id": "example-authenticate-housekeeping",
-      "description": "EXAMPLE (disabled): housekeeping must carry a valid MAC; needs the EAGLEGATE_AUTH_KEY secret",
+      "description": "EXAMPLE (disabled): housekeeping must carry a valid MAC; needs the EAGLEGATE_AUTH_KEY secret. The MAC adds mac_bytes to every packet, so raise the sizes in the allow-hk-status / allow-status-3 rules to match before enabling",
       "type": "authenticity",
       "action": "DENY",
       "enabled": false,
@@ -61,8 +61,8 @@
       }
     },
     {
-      "id": "example-battery-voltage-limits",
-      "description": "EXAMPLE (disabled): battery voltage (UINT16 mV at byte 6) must be 0..9000",
+      "id": "example-hk-value-limits",
+      "description": "EXAMPLE (disabled): HK_STATUS VALUE (FLOAT32 at byte 6 in cmd_tlm/tlm.txt) must be within its documented limits; replace -100..100 with the real ones",
       "type": "range",
       "action": "DENY",
       "enabled": false,
@@ -73,20 +73,33 @@
       },
       "params": {
         "offset": 6,
-        "data_type": "UINT16",
-        "min": 0,
-        "max": 9000
+        "data_type": "FLOAT32",
+        "min": -100,
+        "max": 100
       }
     },
     {
-      "id": "allow-housekeeping",
-      "description": "Housekeeping APIDs",
+      "id": "allow-hk-status",
+      "description": "HK_STATUS (APID 2): exactly 11 bytes, the size defined in cmd_tlm/tlm.txt",
       "action": "ALLOW",
       "match": {
         "apid": [
-          "0x002",
+          "0x002"
+        ],
+        "min_length": 11,
+        "max_length": 11
+      }
+    },
+    {
+      "id": "allow-status-3",
+      "description": "STATUS_3 (APID 3): exactly 10 bytes, the size defined in cmd_tlm/tlm.txt",
+      "action": "ALLOW",
+      "match": {
+        "apid": [
           "0x003"
-        ]
+        ],
+        "min_length": 10,
+        "max_length": 10
       }
     },
     {

@@ -100,3 +100,14 @@ def test_reapplying_unchanged_rules_succeeds_quietly():
     cosmos.run_procedure()
     assert not any("WARNING" in line for line in cosmos.output)
     assert any("SUCCESS" in line for line in cosmos.output)
+
+
+def test_warns_when_connection_is_untrusted():
+    """Applying fixed rules does not reopen an untrusted connection; say so."""
+    iface, proto, store = build()
+    proto.connection_untrusted = True
+    store.text = V2
+    cosmos = FakeCosmos(iface, store)
+    cosmos.run_procedure()
+    assert any("SUCCESS" in line for line in cosmos.output)
+    assert any("WARNING" in line and "Reconnect the interface" in line for line in cosmos.output)
