@@ -16,9 +16,10 @@ How a packet flows through the files in this folder:
        Ruleset.evaluate() checks each rule in order; the first rule that fires decides.
   4. eaglegate_match.py
        Match.holds() decides whether a rule applies to the packet at all.
-  5. eaglegate_rule.py and eaglegate_rule_<type>.py
-       Rule.fires() runs the rule's own check: match, range, sequence, rate or
-       authenticity. Each type and its tunable "params" are in its own file.
+  5. eaglegate_rule.py and eaglegate_rule_types.py
+       Rule.fires() runs the rule's own check: match (in eaglegate_rule.py), or
+       range, sequence, rate or authenticity (each a class in eaglegate_rule_types.py,
+       with its tunable "params" in the class docstring).
 
 How the rules get loaded (on connect, and on the RELOAD_RULES command):
 

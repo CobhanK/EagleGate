@@ -35,7 +35,7 @@ Rules live in `targets/EAGLEGATE/rules/firewall_rules.json` and are checked top 
 | `rate` | Packets arriving faster than the beacon cadence | `min_interval` |
 | `authenticity` | Missing or invalid SDLS-style MAC | `key_env`, `mac_bytes`, `spi` |
 
-Each type's params are documented at the top of its `lib/eaglegate_rule_<type>.py` file. Apply edited rules on a live system with `EAGLEGATE/procedures/apply_firewall_rules.py`.
+Each type's params are documented on its class in `lib/eaglegate_rule_types.py`. Apply edited rules on a live system with `EAGLEGATE/procedures/apply_firewall_rules.py`.
 
 ## Tests
 From `openc3-cosmos-eaglegate`, with the dev requirements installed: `pytest`

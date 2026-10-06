@@ -25,7 +25,7 @@ Rules file format (JSON):
         "bytes": [{"offset": 6, "mask": "0x80", "value": "0x80"}]  # (data[offset] & mask) == value
       },
       "params": { ... }               # tunable settings of the rule type, documented
-    }                                 # at the top of each eaglegate_rule_<type>.py
+    }                                 # on each class in eaglegate_rule_types.py
   ]
 }
 Integers may be JSON numbers or strings like "0x1FF".
@@ -38,10 +38,7 @@ import json
 
 from eaglegate_match import Match
 from eaglegate_rule import MatchRule
-from eaglegate_rule_authenticity import AuthenticityRule
-from eaglegate_rule_range import RangeRule
-from eaglegate_rule_rate import RateRule
-from eaglegate_rule_sequence import SequenceRule
+from eaglegate_rule_types import AuthenticityRule, RangeRule, RateRule, SequenceRule
 from eaglegate_rules_error import RulesError
 from eaglegate_ruleset import Ruleset
 from eaglegate_validate import no_unknown_keys, require

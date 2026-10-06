@@ -9,7 +9,7 @@ A rule applies to a packet when its `match` conditions hold. It then FIRES
   rate          the packet came too soon after the last     DENY only
   authenticity  the MAC trailer is missing or wrong         DENY only
 
-To add a rule type: subclass Rule in a new eaglegate_rule_<type>.py file, set
+To add a rule type: subclass Rule in eaglegate_rule_types.py, set
 TYPE and PARAM_KEYS, implement parse_params() and fires() (and record() if the
 rule remembers earlier packets), then add it to RULE_TYPES in
 eaglegate_rules_parser.py.
