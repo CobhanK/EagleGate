@@ -13,14 +13,20 @@ How a packet flows through the files in this folder:
        length <= max_length) runs here, before the rules, and cannot be turned
        off by the rules file.
   3. eaglegate_ruleset.py
-       Ruleset.evaluate() checks each rule in order; the first match decides.
-  4. eaglegate_rule.py
-       Rule.matches() checks one rule's conditions against the packet.
+       Ruleset.evaluate() checks each rule in order; the first rule that fires decides.
+  4. eaglegate_match.py
+       Match.holds() decides whether a rule applies to the packet at all.
+  5. eaglegate_rule.py and eaglegate_rule_<type>.py
+       Rule.fires() runs the rule's own check: match, range, sequence, rate or
+       authenticity. Each type and its tunable "params" are in its own file.
 
 How the rules get loaded (on connect, and on the RELOAD_RULES command):
 
   firewall_rules.json -> eaglegate_rules_parser.parse_rules() -> Ruleset
-  (eaglegate_rules_error.RulesError if the file is invalid)
+  (eaglegate_rules_error.RulesError if the file is invalid; the checks
+  themselves live in eaglegate_validate.py)
+
+  * reloading also resets what the sequence and rate rules remember
 
   * an invalid file never replaces a working rule set (last known good is kept);
     if no valid rules were ever loaded, everything is denied (fail closed)
