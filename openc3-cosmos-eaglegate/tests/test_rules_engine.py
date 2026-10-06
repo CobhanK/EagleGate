@@ -1,7 +1,9 @@
 """Rules engine tests: pure Python, no COSMOS runtime at all."""
+import json
+
 import pytest
 
-from conftest import ccsds, rules_json, shipped_rules_text
+from conftest import STATUS_3_LENGTH, ccsds, hk_status, rules_json, shipped_rules_text, status_3
 from eaglegate_rules_error import RulesError
 from eaglegate_rules_parser import parse_rules
 
@@ -15,11 +17,21 @@ def evaluate(rules, packet, default_action="DENY"):
 def test_shipped_rules_file_is_valid_and_matches_old_policy():
     rs = parse_rules(shipped_rules_text())
     assert rs.default_action == "DENY"
-    assert [r.id for r in rs.rules] == ["deny-commands-on-tlm-link", "allow-housekeeping"]  # examples disabled
-    assert rs.evaluate(ccsds(2))[0] == "ALLOW"
-    assert rs.evaluate(ccsds(3))[0] == "ALLOW"
+    assert [r.id for r in rs.rules] == [  # examples disabled
+        "deny-commands-on-tlm-link", "allow-hk-status", "allow-status-3"]
+    assert rs.evaluate(hk_status()) == ("ALLOW", "allow-hk-status")
+    assert rs.evaluate(status_3()) == ("ALLOW", "allow-status-3")
     assert rs.evaluate(ccsds(0x100)) == ("DENY", None)
-    assert rs.evaluate(ccsds(2, packet_type=1)) == ("DENY", "deny-commands-on-tlm-link")
+    assert rs.evaluate(hk_status(packet_type=1)) == ("DENY", "deny-commands-on-tlm-link")
+
+
+def test_shipped_rules_deny_wrong_sized_housekeeping():
+    """A known APID is not enough: the size must match the packet definition."""
+    rs = parse_rules(shipped_rules_text())
+    assert len(ccsds(2)) == 7
+    assert rs.evaluate(ccsds(2)) == ("DENY", None)                    # 7 bytes, needs 11
+    assert rs.evaluate(ccsds(2, bytes(6))) == ("DENY", None)          # 12 bytes, one too many
+    assert rs.evaluate(ccsds(3, bytes(STATUS_3_LENGTH))) == ("DENY", None)  # 16 bytes, needs 10
 
 
 # ---- matching semantics ----
@@ -122,3 +134,18 @@ def test_error_messages_name_the_rule():
              {"id": "broken-one", "action": "ALLOW", "match": {"apid": [99999]}}]
     with pytest.raises(RulesError, match="rule 'broken-one'"):
         parse_rules(rules_json(rules))
+
+
+def test_shipped_examples_are_valid_when_enabled(monkeypatch):
+    """Disabled rules skip param checks, so check the examples an operator may enable."""
+    monkeypatch.setenv("EAGLEGATE_AUTH_KEY", "00" * 16)
+    doc = json.loads(shipped_rules_text())
+    for rule in doc["rules"]:
+        rule["enabled"] = True
+    rs = parse_rules(json.dumps(doc))
+    assert len(rs.rules) == len(doc["rules"])
+
+
+def test_boolean_is_not_an_integer():
+    with pytest.raises(RulesError, match="expected an integer"):
+        parse_rules(rules_json([{"id": "r", "action": "DENY", "match": {"apid": [True]}}]))

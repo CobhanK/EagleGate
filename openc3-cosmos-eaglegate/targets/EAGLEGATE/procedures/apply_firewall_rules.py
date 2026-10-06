@@ -74,6 +74,10 @@ def apply_firewall_rules():
 
     state = wait_until_active(sha256, before)
     print(f"SUCCESS: rules version {state['rules']['version']} active on {INTERFACE}")
+    if state["connection_untrusted"]:
+        # Rejected bytes were dropped unframed, so only a reconnect restarts cleanly
+        print(f"WARNING: {INTERFACE} is discarding all telemetry because the first packet of "
+              "this connection was rejected. Reconnect the interface to resume.")
     return state
 
 

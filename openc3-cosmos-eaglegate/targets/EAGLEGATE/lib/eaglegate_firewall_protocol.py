@@ -13,14 +13,27 @@ How a packet flows through the files in this folder:
        length <= max_length) runs here, before the rules, and cannot be turned
        off by the rules file.
   3. eaglegate_ruleset.py
-       Ruleset.evaluate() checks each rule in order; the first match decides.
-  4. eaglegate_rule.py
-       Rule.matches() checks one rule's conditions against the packet.
+       Ruleset.evaluate() checks each rule in order; the first rule that fires decides.
+  4. eaglegate_match.py
+       Match.holds() decides whether a rule applies to the packet at all.
+  5. eaglegate_rule.py and eaglegate_rule_types.py
+       Rule.fires() runs the rule's own check: match (in eaglegate_rule.py), or
+       range, sequence, rate or authenticity (each a class in eaglegate_rule_types.py,
+       with its tunable "params" in the class docstring).
+
+If the FIRST packet of a connection is rejected (for any reason), the
+connection is untrusted: every later byte is discarded until the interface
+reconnects. A rejection after an allowed first packet affects only that packet.
 
 How the rules get loaded (on connect, and on the RELOAD_RULES command):
 
   firewall_rules.json -> eaglegate_rules_parser.parse_rules() -> Ruleset
-  (eaglegate_rules_error.RulesError if the file is invalid)
+  (eaglegate_rules_error.RulesError if the file is invalid; the checks
+  themselves live in eaglegate_validate.py)
+
+  * loading an UNCHANGED file (same sha256) keeps the running rule set, so
+    reconnects never reset what the sequence and rate rules remember; a
+    changed file starts them fresh
 
   * an invalid file never replaces a working rule set (last known good is kept);
     if no valid rules were ever loaded, everything is denied (fail closed)
@@ -73,6 +86,8 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.rules_error_at = None
         self.rejected = 0
         self.discarded_bytes = 0
+        self.first_packet_decided = False  # has this connection's first packet been judged?
+        self.connection_untrusted = False  # first packet was rejected: deny all until reconnect
 
     # ---- reading packets -----------------------------------------------------
 
@@ -84,8 +99,13 @@ class EaglegateFirewallProtocol(LengthProtocol):
         before asking again, so an allowed packet already sitting in our buffer
         would be delayed. Instead we keep pulling packets from the buffer until
         one is allowed or the buffer is empty.
+
+        If the first packet of a connection is rejected, the whole connection is
+        untrusted: every later byte is discarded until the interface reconnects.
         """
         while True:
+            if self.connection_untrusted:
+                return self._discard_all(data, extra)
             data, extra = super().read_data(data, extra)  # next whole packet, or STOP
             if data in ("STOP", "DISCONNECT"):
                 return (data, extra)
@@ -95,6 +115,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             except Exception as error:  # an exception here would disconnect COSMOS
                 action, rule_id = "DENY", f"error: {error}"
             if action == "ALLOW":
+                self.first_packet_decided = True
                 return (data, extra)
             self._reject(
                 f"APID 0x{CcsdsHeader.from_bytes(data).apid:03X} denied by "
@@ -135,12 +156,27 @@ class EaglegateFirewallProtocol(LengthProtocol):
     def _reject(self, reason):
         self.rejected += 1
         Logger.warn(f"{self._name()} firewall rejected: {reason} (total {self.rejected})")
+        if not self.first_packet_decided:
+            self.first_packet_decided = True
+            self.connection_untrusted = True
+            Logger.error(
+                f"{self._name()} firewall: first packet of the connection was rejected; "
+                "discarding everything until the interface reconnects"
+            )
+
+    def _discard_all(self, data, extra):
+        """Drop new and buffered bytes without framing them (logged once, in _reject)."""
+        self.discarded_bytes += len(self.data) + len(data)
+        self.data = b""
+        return ("STOP", extra)
 
     # ---- loading rules -------------------------------------------------------
 
     def connect_reset(self):
         """Called by COSMOS every time the interface (re)connects."""
         super().connect_reset()
+        self.first_packet_decided = False  # a new connection gets a fresh start
+        self.connection_untrusted = False
         self.load_rules()
 
     def protocol_cmd(self, cmd_name, *cmd_args):
@@ -164,12 +200,16 @@ class EaglegateFirewallProtocol(LengthProtocol):
                 + (" (DENY ALL)" if self.ruleset.version < 0 else "")
             )
             return False
+        self.rules_error = None
+        self.rules_error_at = None
+        if new_ruleset.sha256 == self.ruleset.sha256:
+            # Same file: keep the running set, so what the sequence and rate rules
+            # remember survives reconnects (a reset would let one replay through)
+            return True
         old_version = self.ruleset.version
         # A single assignment: read_data sees the old or the new set, never a mix
         self.ruleset = new_ruleset
         self.rules_loaded_at = _now()
-        self.rules_error = None
-        self.rules_error_at = None
         Logger.info(
             f"{self._name()} firewall: rules version {old_version} -> {new_ruleset.version} "
             f"({len(new_ruleset.rules)} active rules, sha256 {new_ruleset.sha256[:12]})"
@@ -199,6 +239,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "rules_error_at": self.rules_error_at,
             "rejected": self.rejected,
             "discarded_bytes": self.discarded_bytes,
+            "connection_untrusted": self.connection_untrusted,
             "max_length": self.fw_max_length,
         }
         return result

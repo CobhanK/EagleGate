@@ -39,9 +39,18 @@ task :build => [:require_version] do
   gem_name = PLUGIN_NAME + '-' + gem_version + '.gem'
 
   sh('gem', 'build', PLUGIN_NAME)
+
+  # Only a validated gem is left behind, so a .gem file always means "ready to install"
   sh("openc3cli validate #{gem_name}") do |ok, status|
-    if !ok && status.exitstatus == 127 # command not found
-      puts "Install the openc3 gem to validate! (gem install openc3)"
+    unless ok
+      File.delete(gem_name) if File.exist?(gem_name)
+      reason = if status.exitstatus == 127 # command not found
+        "openc3cli not found. Build through openc3.sh cli, or install the openc3 gem (gem install openc3)"
+      else
+        "see the validation errors above"
+      end
+      abort "BUILD FAILED: #{gem_name} did not validate (#{reason}). The gem was deleted."
     end
   end
+  puts "Built and validated #{gem_name}"
 end

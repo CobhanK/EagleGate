@@ -1,33 +1,137 @@
 {
   "version": 1,
-  "description": "EAGLEGATE telemetry firewall. Rules are checked top to bottom; the first match decides. Bump 'version' on every change.",
+  "description": "EAGLEGATE telemetry firewall. Rules are checked top to bottom; the first rule that fires decides. Check rules (authenticity, sequence, rate, range) go above the ALLOW rules they protect. Bump 'version' on every change.",
   "default_action": "DENY",
   "rules": [
     {
       "id": "deny-commands-on-tlm-link",
       "description": "Command-type packets never belong on the telemetry downlink",
       "action": "DENY",
-      "match": { "packet_type": "CMD" }
+      "match": {
+        "packet_type": "CMD"
+      }
     },
     {
-      "id": "allow-housekeeping",
-      "description": "Housekeeping APIDs",
+      "id": "example-authenticate-housekeeping",
+      "description": "EXAMPLE (disabled): housekeeping must carry a valid MAC; needs the EAGLEGATE_AUTH_KEY secret. The MAC adds mac_bytes to every packet, so raise the sizes in the allow-hk-status / allow-status-3 rules to match before enabling",
+      "type": "authenticity",
+      "action": "DENY",
+      "enabled": false,
+      "match": {
+        "apid": [
+          "0x002",
+          "0x003"
+        ]
+      },
+      "params": {
+        "key_env": "EAGLEGATE_AUTH_KEY",
+        "mac_bytes": 16
+      }
+    },
+    {
+      "id": "example-housekeeping-in-sequence",
+      "description": "EXAMPLE (disabled): deny replayed or out-of-order housekeeping packets",
+      "type": "sequence",
+      "action": "DENY",
+      "enabled": false,
+      "match": {
+        "apid": [
+          "0x002",
+          "0x003"
+        ]
+      },
+      "params": {
+        "max_gap": 1
+      }
+    },
+    {
+      "id": "example-housekeeping-cadence",
+      "description": "EXAMPLE (disabled): housekeeping beacons once per second; deny anything faster",
+      "type": "rate",
+      "action": "DENY",
+      "enabled": false,
+      "match": {
+        "apid": [
+          "0x002",
+          "0x003"
+        ]
+      },
+      "params": {
+        "min_interval": 0.9
+      }
+    },
+    {
+      "id": "example-hk-value-limits",
+      "description": "EXAMPLE (disabled): HK_STATUS VALUE (FLOAT32 at byte 6 in cmd_tlm/tlm.txt) must be within its documented limits; replace -100..100 with the real ones",
+      "type": "range",
+      "action": "DENY",
+      "enabled": false,
+      "match": {
+        "apid": [
+          "0x002"
+        ]
+      },
+      "params": {
+        "offset": 6,
+        "data_type": "FLOAT32",
+        "min": -100,
+        "max": 100
+      }
+    },
+    {
+      "id": "allow-hk-status",
+      "description": "HK_STATUS (APID 2): exactly 11 bytes, the size defined in cmd_tlm/tlm.txt",
       "action": "ALLOW",
-      "match": { "apid": ["0x002", "0x003"] }
+      "match": {
+        "apid": [
+          "0x002"
+        ],
+        "min_length": 11,
+        "max_length": 11
+      }
+    },
+    {
+      "id": "allow-status-3",
+      "description": "STATUS_3 (APID 3): exactly 10 bytes, the size defined in cmd_tlm/tlm.txt",
+      "action": "ALLOW",
+      "match": {
+        "apid": [
+          "0x003"
+        ],
+        "min_length": 10,
+        "max_length": 10
+      }
     },
     {
       "id": "example-science-small-only",
       "description": "EXAMPLE (disabled): allow science APIDs only up to 512 bytes",
       "action": "ALLOW",
       "enabled": false,
-      "match": { "apid_range": ["0x100", "0x1FF"], "max_length": 512 }
+      "match": {
+        "apid_range": [
+          "0x100",
+          "0x1FF"
+        ],
+        "max_length": 512
+      }
     },
     {
       "id": "example-deny-flag-bit",
       "description": "EXAMPLE (disabled): deny APID 5 when the top bit of byte 6 is set",
       "action": "DENY",
       "enabled": false,
-      "match": { "apid": [5], "bytes": [{ "offset": 6, "mask": "0x80", "value": "0x80" }] }
+      "match": {
+        "apid": [
+          5
+        ],
+        "bytes": [
+          {
+            "offset": 6,
+            "mask": "0x80",
+            "value": "0x80"
+          }
+        ]
+      }
     }
   ]
 }
