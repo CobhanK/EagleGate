@@ -3,14 +3,14 @@
 # Create the overall gemspec
 Gem::Specification.new do |s|
   s.name = 'openc3-cosmos-eaglegate'
-  s.summary = 'OpenC3 openc3-cosmos-eaglegate plugin, an application firewall for OpenC3'
+  s.summary = 'OpenC3 openc3-cosmos-eaglegate plugin to protect downlink communications'
   s.description = <<-EOF
     openc3-cosmos-eaglegate plugin for deployment to OpenC3
   EOF
   s.licenses = 'MIT'
   s.authors = ['Cobhan Kale','Emmanuel Romero Gonzalez']
-  s.email = ['cobhank@berkeley.edu']
-  s.homepage = 'https://github.com/CobhanK/EagleGate'
+  s.email = ['cobhank@berkeley.edu','emmanuel_romero@berkeley.edu']
+  s.homepage = 'https://github.com/CobhanK/EagleGate/'
   s.platform = Gem::Platform::RUBY
   s.required_ruby_version = '>= 3.0'
 
