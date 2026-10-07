@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass
 
 from eaglegate_ccsds_header import CcsdsHeader
+from eaglegate_verdict import DEFAULT, RULE, Verdict
 
 
 @dataclass
@@ -19,8 +20,7 @@ class Ruleset:
         return cls(version=-1, default_action="DENY", rules=[], sha256="")
 
     def evaluate(self, packet, now=None):
-        """Return (action, rule_id) for one packet. The FIRST rule that fires wins.
-        rule_id is None when no rule fired and the default action was used.
+        """Return the Verdict for one packet. The FIRST rule that fires wins.
         `now` (monotonic seconds) is only passed in by tests."""
         header = CcsdsHeader.from_bytes(packet)
         now = time.monotonic() if now is None else now
@@ -28,20 +28,30 @@ class Ruleset:
         for rule in self.rules:
             if not rule.match.holds(header, packet):
                 continue
-            if rule.fires(header, packet, now):
+            detail = rule.fires(header, packet, now)
+            if detail is not None:
                 rule.hits += 1
-                return self._decide(rule.action, rule.id, passed, header, now)
+                return self._decide(passed, header, now, Verdict(
+                    action=rule.action, stage=RULE, detail=detail, rule_id=rule.id,
+                    rule_type=rule.TYPE, rule_description=rule.description,
+                    rules_version=self.version, rules_sha256=self.sha256))
             passed.append(rule)
         self.default_hits += 1
-        return self._decide(self.default_action, None, passed, header, now)
+        if self.version < 0:
+            detail = "no valid rules file has been loaded; denying everything (see rules_error)"
+        else:
+            detail = f"no rule fired; default action {self.default_action}"
+        return self._decide(passed, header, now, Verdict(
+            action=self.default_action, stage=DEFAULT, detail=detail,
+            rules_version=self.version, rules_sha256=self.sha256))
 
     @staticmethod
-    def _decide(action, rule_id, passed, header, now):
+    def _decide(passed, header, now, verdict):
         """Stateful rules (sequence, rate) only remember packets that are ALLOWED."""
-        if action == "ALLOW":
+        if verdict.action == "ALLOW":
             for rule in passed:
                 rule.record(header, now)
-        return action, rule_id
+        return verdict
 
     def summary(self):
         """Plain dict for interface_details()."""

@@ -22,3 +22,31 @@ TELEMETRY EAGLEGATE STATUS_3 BIG_ENDIAN "Second packet (APID 3)"
   APPEND_ITEM    CCSDS_SEQCOUNT  14 UINT   "Sequence count"
   APPEND_ITEM    CCSDS_LENGTH    16 UINT   "Payload length - 1"
   APPEND_ITEM    VALUE           32 FLOAT  "Value"
+
+# Published by the firewall protocol inside COSMOS (eaglegate_quarantine.py), never
+# received. Its ID is CCSDS version 7: the firewall's hardcoded structural check
+# rejects every received packet whose version is not 0, so nothing arriving on the
+# link can ever be identified as this packet. Item names and string sizes must
+# match STATUS_STRING_CHARS and status_items() in the protocol.
+TELEMETRY EAGLEGATE FIREWALL_STATUS BIG_ENDIAN "Firewall rejection counts and the last rejection reason"
+  APPEND_ID_ITEM CCSDS_VERSION         3 UINT 7  "Always 7, so received packets can never match"
+  APPEND_ITEM    SPARE                 5 UINT    "Unused"
+  APPEND_ITEM    REJECTED             32 UINT    "Packets rejected since the interface started"
+  APPEND_ITEM    DENIED_RULE          32 UINT    "Rejected by a rule in the rules file"
+  APPEND_ITEM    DENIED_DEFAULT       32 UINT    "Rejected because no rule fired (default action)"
+  APPEND_ITEM    DENIED_ERROR         32 UINT    "Rejected because evaluating the rules failed"
+  APPEND_ITEM    DENIED_STRUCTURAL    32 UINT    "Rejected by the hardcoded header check"
+  APPEND_ITEM    DISCARDED_BYTES      32 UINT    "Bytes dropped without framing (bad headers, untrusted connections)"
+  APPEND_ITEM    QUARANTINED          32 UINT    "Rejections stored in the quarantine streams"
+  APPEND_ITEM    QUARANTINE_ERRORS    32 UINT    "Rejections that could not be stored"
+    LIMITS DEFAULT 1 ENABLED -2 -1 0.5 1
+  APPEND_ITEM    CONNECTION_UNTRUSTED  8 UINT    "First packet was rejected: all telemetry discarded until reconnect"
+    STATE FALSE 0 GREEN
+    STATE TRUE 1 RED
+  APPEND_ITEM    RULES_VERSION        32 INT     "Active rules version (-1 = deny all, no valid rules loaded)"
+  APPEND_ITEM    LAST_TIME           256 STRING  "UTC time of the last rejection"
+  APPEND_ITEM    LAST_STAGE           96 STRING  "RULE, DEFAULT, ERROR, STRUCTURAL or UNTRUSTED"
+  APPEND_ITEM    LAST_RULE_ID        512 STRING  "Rule that rejected the last packet (RULE stage)"
+  APPEND_ITEM    LAST_APID            64 STRING  "APID of the last rejected packet, if it had a header"
+  APPEND_ITEM    LAST_REASON        2048 STRING  "Why the last packet was rejected"
+  APPEND_ITEM    LAST_ENTRY_ID       256 STRING  "Quarantine stream entry of the last rejection (empty if not stored)"

@@ -1,7 +1,9 @@
 """The base class every rule type shares, plus the plain "match" rule.
 
 A rule applies to a packet when its `match` conditions hold. It then FIRES
-(and its action decides the packet) when its own check says so:
+(and its action decides the packet) when its own check says so. fires()
+returns None when the rule does not fire, otherwise a short reason saying what
+it found; that reason is what operators see for quarantined packets:
 
   match         fires on every packet it applies to         ALLOW or DENY
   range         a value is outside its documented limits    DENY only
@@ -28,6 +30,7 @@ class Rule:
     id: str
     action: str
     match: Match
+    description: str = ""      # the rule's "description" from the rules file
     hits: int = 0              # how many packets this rule has decided
 
     @classmethod
@@ -36,7 +39,9 @@ class Rule:
         return {}
 
     def fires(self, header, packet, now):
-        """True if this rule decides the packet. `now` is a monotonic time in seconds."""
+        """None if this rule does not decide the packet, otherwise why it does: name
+        the value found and the limit it broke, never secrets such as keys or the
+        expected MAC. `now` is a monotonic time in seconds."""
         raise NotImplementedError
 
     def record(self, header, now):
@@ -53,4 +58,4 @@ class MatchRule(Rule):
     ACTIONS = ("ALLOW", "DENY")
 
     def fires(self, header, packet, now):
-        return True
+        return self.match.summary

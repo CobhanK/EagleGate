@@ -1,5 +1,6 @@
 """The "match" object every rule has: which packets the rule applies to."""
 from dataclasses import dataclass, field
+from functools import cached_property
 
 from eaglegate_ccsds_header import CMD, MAX_APID, MAX_PACKET, MIN_PACKET, TLM
 from eaglegate_validate import no_unknown_keys, require, to_int
@@ -42,6 +43,27 @@ class Match:
             if packet[offset] & mask != value:
                 return False
         return True
+
+    @cached_property
+    def summary(self):
+        """The conditions in words, e.g. "matched APID 0x002; length 11..11".
+        Cached: a match rule returns it for every packet it decides."""
+        parts = []
+        if self.apids is not None:
+            parts.append("APID " + ",".join(f"0x{apid:03X}" for apid in sorted(self.apids)))
+        if self.apid_min is not None:
+            parts.append(f"APID 0x{self.apid_min:03X}..0x{self.apid_max:03X}")
+        if self.packet_type is not None:
+            parts.append("type " + ("CMD" if self.packet_type == CMD else "TLM"))
+        if self.sec_hdr is not None:
+            parts.append(f"sec_hdr {bool(self.sec_hdr)}")
+        if self.min_length is not None or self.max_length is not None:
+            low = "" if self.min_length is None else self.min_length
+            high = "" if self.max_length is None else self.max_length
+            parts.append(f"length {low}..{high}")
+        for offset, mask, value in self.byte_checks:
+            parts.append(f"byte[{offset}] & 0x{mask:02X} == 0x{value:02X}")
+        return "matched " + ("; ".join(parts) if parts else "every packet")
 
     @classmethod
     def parse(cls, raw, where):
