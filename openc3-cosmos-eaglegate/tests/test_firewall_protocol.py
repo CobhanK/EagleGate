@@ -183,7 +183,8 @@ def test_details_report_active_rules_and_counters():
 def test_reject_log_names_the_rule(log):
     iface, _, _ = build([ccsds(2, packet_type=1) + status_3()])
     read_all(iface)
-    assert any("denied by rule 'deny-commands-on-tlm-link' (rules v1)" in m for _, m in log)
+    assert any("rejected APID 0x002: DENY by rule 'deny-commands-on-tlm-link': matched type CMD (rules v1)"
+               in m for _, m in log)
 
 
 # ---- structural floor cannot be disabled by rules ----
@@ -276,7 +277,7 @@ def test_error_while_evaluating_denies_packet_and_keeps_running(log):
 
     proto.ruleset.evaluate = evaluate_failing_on_second_packet
     assert apids(read_all(iface)) == [2, 3]  # the second packet is dropped, nothing else
-    assert any("denied by rule 'error: boom'" in m for _, m in log)
+    assert any("DENY by error: rules engine error: boom" in m for _, m in log)
 
 
 SEQUENCE_RULES = rules_json([

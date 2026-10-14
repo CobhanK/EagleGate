@@ -99,6 +99,8 @@ def _parse_rule(raw, where):
 
     enabled = raw.get("enabled", True)
     require(isinstance(enabled, bool), f"{where}.enabled must be true or false")
+    description = raw.get("description", "")
+    require(isinstance(description, str), f"{where}.description must be a string")
     require("match" in raw, f"{where} is missing 'match' (use {{}} to match everything)")
     match = Match.parse(raw["match"], f"{where}.match")
 
@@ -109,7 +111,7 @@ def _parse_rule(raw, where):
         return rule_id, None
 
     settings = rule_class.parse_params(params, f"{where}.params")
-    return rule_id, rule_class(id=rule_id, action=action, match=match, **settings)
+    return rule_id, rule_class(id=rule_id, action=action, match=match, description=description, **settings)
 
 
 def _action(value, allowed, where):

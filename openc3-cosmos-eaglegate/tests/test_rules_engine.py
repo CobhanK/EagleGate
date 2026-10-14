@@ -3,13 +3,13 @@ import json
 
 import pytest
 
-from conftest import STATUS_3_LENGTH, ccsds, hk_status, rules_json, shipped_rules_text, status_3
+from conftest import STATUS_3_LENGTH, ccsds, decide, hk_status, rules_json, shipped_rules_text, status_3
 from eaglegate_rules_error import RulesError
 from eaglegate_rules_parser import parse_rules
 
 
 def evaluate(rules, packet, default_action="DENY"):
-    return parse_rules(rules_json(rules, default_action)).evaluate(packet)
+    return decide(parse_rules(rules_json(rules, default_action)), packet)
 
 
 # ---- the shipped rules file ----
@@ -19,19 +19,19 @@ def test_shipped_rules_file_is_valid_and_matches_old_policy():
     assert rs.default_action == "DENY"
     assert [r.id for r in rs.rules] == [  # examples disabled
         "deny-commands-on-tlm-link", "allow-hk-status", "allow-status-3"]
-    assert rs.evaluate(hk_status()) == ("ALLOW", "allow-hk-status")
-    assert rs.evaluate(status_3()) == ("ALLOW", "allow-status-3")
-    assert rs.evaluate(ccsds(0x100)) == ("DENY", None)
-    assert rs.evaluate(hk_status(packet_type=1)) == ("DENY", "deny-commands-on-tlm-link")
+    assert decide(rs,hk_status()) == ("ALLOW", "allow-hk-status")
+    assert decide(rs,status_3()) == ("ALLOW", "allow-status-3")
+    assert decide(rs,ccsds(0x100)) == ("DENY", None)
+    assert decide(rs,hk_status(packet_type=1)) == ("DENY", "deny-commands-on-tlm-link")
 
 
 def test_shipped_rules_deny_wrong_sized_housekeeping():
     """A known APID is not enough: the size must match the packet definition."""
     rs = parse_rules(shipped_rules_text())
     assert len(ccsds(2)) == 7
-    assert rs.evaluate(ccsds(2)) == ("DENY", None)                    # 7 bytes, needs 11
-    assert rs.evaluate(ccsds(2, bytes(6))) == ("DENY", None)          # 12 bytes, one too many
-    assert rs.evaluate(ccsds(3, bytes(STATUS_3_LENGTH))) == ("DENY", None)  # 16 bytes, needs 10
+    assert decide(rs,ccsds(2)) == ("DENY", None)                    # 7 bytes, needs 11
+    assert decide(rs,ccsds(2, bytes(6))) == ("DENY", None)          # 12 bytes, one too many
+    assert decide(rs,ccsds(3, bytes(STATUS_3_LENGTH))) == ("DENY", None)  # 16 bytes, needs 10
 
 
 # ---- matching semantics ----
@@ -76,7 +76,7 @@ def test_disabled_rules_are_skipped():
 def test_hit_counters():
     rs = parse_rules(rules_json([{"id": "a", "action": "ALLOW", "match": {"apid": [1]}}]))
     for apid in (1, 1, 2):
-        rs.evaluate(ccsds(apid))
+        decide(rs,ccsds(apid))
     assert rs.summary()["rule_hits"] == {"a": 2}
     assert rs.summary()["default_hits"] == 1
 

@@ -68,9 +68,20 @@ class RangeRule(Rule):
     def fires(self, header, packet, now):
         layout = DATA_TYPES[self.data_type]
         if self.offset + struct.calcsize(layout) > len(packet):
-            return True  # value missing: the packet is malformed for this APID
+            # value missing: the packet is malformed for this APID
+            return f"packet is {len(packet)} bytes, too short for {self.data_type} at offset {self.offset}"
         (value,) = struct.unpack_from(layout, packet, self.offset)
-        return not (self.min <= value <= self.max)  # NaN fails both comparisons, so it fires
+        if self.min <= value <= self.max:  # NaN fails both comparisons, so it fires
+            return None
+        return f"{self.data_type} at offset {self.offset} = {value}, allowed {_limits(self.min, self.max)}"
+
+
+def _limits(low, high):
+    if low == -math.inf:
+        return f"<= {high:g}"
+    if high == math.inf:
+        return f">= {low:g}"
+    return f"{low:g}..{high:g}"
 
 
 # ---- sequence ----------------------------------------------------------------
@@ -106,9 +117,18 @@ class SequenceRule(Rule):
     def fires(self, header, packet, now):
         last = self.last_count.get(header.apid)
         if last is None:
-            return False
+            return None
         step = (header.seq_count - last) % SEQ_COUNT_MODULO  # how far ahead, allowing for wrap
-        return not (1 <= step <= self.max_gap)
+        if 1 <= step <= self.max_gap:
+            return None
+        if step == 0:
+            found = "repeats the last allowed count"
+        elif step <= SEQ_COUNT_MODULO // 2:
+            found = f"is {step} ahead"
+        else:
+            found = f"is {SEQ_COUNT_MODULO - step} behind"
+        return (f"sequence count {header.seq_count} {found} (last allowed {last}, "
+                f"max_gap {self.max_gap})")
 
     def record(self, header, now):
         self.last_count[header.apid] = header.seq_count
@@ -147,7 +167,9 @@ class RateRule(Rule):
 
     def fires(self, header, packet, now):
         last = self.last_time.get(header.apid)
-        return last is not None and now - last < self.min_interval
+        if last is None or now - last >= self.min_interval:
+            return None
+        return f"{now - last:.3f} s after the last allowed packet, min_interval {self.min_interval:g} s"
 
     def record(self, header, now):
         self.last_time[header.apid] = now
@@ -208,13 +230,19 @@ class AuthenticityRule(Rule):
         }
 
     def fires(self, header, packet, now):
+        """The reason shows the RECEIVED MAC (it was sent in the clear anyway) but
+        never the expected one: that would hand out a valid MAC for this packet."""
         spi_bytes = SPI_BYTES if self.spi is not None else 0
-        if len(packet) < CCSDS_HEADER_BYTES + spi_bytes + self.mac_bytes:
-            return True  # too short to carry the security fields
+        needed = CCSDS_HEADER_BYTES + spi_bytes + self.mac_bytes
+        if len(packet) < needed:
+            return f"packet is {len(packet)} bytes, too short for the security fields ({needed} bytes)"
         if self.spi is not None:
             spi_at = CCSDS_HEADER_BYTES
-            if int.from_bytes(packet[spi_at:spi_at + SPI_BYTES], "big") != self.spi:
-                return True
+            spi = int.from_bytes(packet[spi_at:spi_at + SPI_BYTES], "big")
+            if spi != self.spi:
+                return f"SPI 0x{spi:04X}, expected 0x{self.spi:04X}"
         signed, mac = packet[:-self.mac_bytes], packet[-self.mac_bytes:]
         expected = hmac.new(self.key, signed, hashlib.sha256).digest()[:self.mac_bytes]
-        return not hmac.compare_digest(mac, expected)  # constant time, no timing leak
+        if hmac.compare_digest(mac, expected):  # constant time, no timing leak
+            return None
+        return f"MAC mismatch, received {mac.hex()}"

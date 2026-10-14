@@ -18,6 +18,54 @@ PROCEDURE_PATH = os.path.join(ROOT, "targets", "EAGLEGATE", "procedures", "apply
 sys.path.insert(0, LIB)
 
 import eaglegate_firewall_protocol  # noqa: E402
+import eaglegate_quarantine  # noqa: E402
+
+# The real COSMOS boundary methods, before the `valkey` fixture replaces them
+REAL_WRITE = eaglegate_quarantine.QuarantineWriter._write
+REAL_INJECT = eaglegate_quarantine.StatusPublisher._inject
+
+
+class FakeValkey:
+    """Records what the quarantine writer and status publisher would send to COSMOS."""
+
+    def __init__(self):
+        self.entries = []   # (stream, fields, maxlen)
+        self.status = []    # item_hash of each FIREWALL_STATUS packet
+        self.fail = False   # make every write raise, like a Valkey outage
+
+    def write(self, writer, stream, fields, maxlen):
+        if self.fail:
+            raise ConnectionError("valkey down")
+        self.entries.append((stream, fields, maxlen))
+        return f"{len(self.entries)}-0".encode()
+
+    def inject(self, publisher, message_json):
+        if self.fail:
+            raise ConnectionError("valkey down")
+        message = json.loads(message_json)
+        assert (message["target_name"], message["packet_name"]) == ("EAGLEGATE", "FIREWALL_STATUS")
+        self.status.append(message["item_hash"])
+
+    def stream(self, suffix):
+        """Field dicts written to the stream whose name ends with suffix."""
+        return [fields for stream, fields, _ in self.entries if stream.endswith(suffix)]
+
+
+@pytest.fixture(autouse=True)
+def valkey(monkeypatch):
+    """No test ever talks to a real Valkey."""
+    fake = FakeValkey()
+    monkeypatch.setattr(eaglegate_quarantine.QuarantineWriter, "_write",
+                        lambda self, stream, fields, maxlen: fake.write(self, stream, fields, maxlen))
+    monkeypatch.setattr(eaglegate_quarantine.StatusPublisher, "_inject",
+                        lambda self, message_json: fake.inject(self, message_json))
+    return fake
+
+
+def decide(ruleset, packet, now=None):
+    """(action, rule_id) of a Verdict, for compact assertions."""
+    verdict = ruleset.evaluate(packet, now=now)
+    return (verdict.action, verdict.rule_id)
 
 
 @pytest.fixture(autouse=True)
