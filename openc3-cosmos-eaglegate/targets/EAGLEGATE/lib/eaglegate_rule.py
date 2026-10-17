@@ -12,7 +12,7 @@ it found; that reason is what operators see for quarantined packets:
   authenticity  the MAC trailer is missing or wrong         DENY only
 
 To add a rule type: subclass Rule in eaglegate_rule_types.py, set
-TYPE and PARAM_KEYS, implement parse_params() and fires() (and record() if the
+TYPE, PARAM_KEYS and PARAM_SCHEMA, implement parse_params() and fires() (and record() if the
 rule remembers earlier packets), then add it to RULE_TYPES in
 eaglegate_rules_parser.py.
 """
@@ -26,6 +26,8 @@ class Rule:
     TYPE = None                # the "type" value in the rules file
     ACTIONS = ("DENY",)        # check rules can only deny
     PARAM_KEYS = frozenset()   # keys allowed in the rule's "params" object
+    PARAM_SCHEMA = {}          # the same keys described for the rules editor page (rules_schema())
+    PARAM_RULES = []           # cross-field checks parse_params() makes, in words
 
     id: str
     action: str

@@ -43,6 +43,15 @@ class RangeRule(Rule):
 
     TYPE = "range"
     PARAM_KEYS = frozenset({"offset", "data_type", "min", "max"})
+    PARAM_SCHEMA = {
+        "offset": {"type": "int", "min": 0, "max": MAX_PACKET - 1, "required": True,
+                   "help": "byte offset of the value in the whole packet"},
+        "data_type": {"type": "enum", "values": list(DATA_TYPES), "required": True,
+                      "help": "always big-endian (CCSDS)"},
+        "min": {"type": "number", "help": "lowest allowed value, inclusive"},
+        "max": {"type": "number", "help": "highest allowed value, inclusive"},
+    }
+    PARAM_RULES = ["at least one of min and max", "min <= max"]
 
     offset: int
     data_type: str
@@ -105,6 +114,10 @@ class SequenceRule(Rule):
 
     TYPE = "sequence"
     PARAM_KEYS = frozenset({"max_gap"})
+    PARAM_SCHEMA = {
+        "max_gap": {"type": "int", "min": 1, "max": SEQ_COUNT_MODULO // 2, "default": 1,
+                    "help": "1 accepts only the next count; N also accepts a jump of up to N"},
+    }
 
     max_gap: int = 1
     last_count: dict = field(default_factory=dict)  # APID -> count of the last allowed packet
@@ -154,6 +167,10 @@ class RateRule(Rule):
 
     TYPE = "rate"
     PARAM_KEYS = frozenset({"min_interval"})
+    PARAM_SCHEMA = {
+        "min_interval": {"type": "number", "min_exclusive": 0, "max": MAX_INTERVAL, "required": True,
+                         "help": "seconds; set a little below the real cadence to allow jitter"},
+    }
 
     min_interval: float
     last_time: dict = field(default_factory=dict)  # APID -> arrival time of the last allowed packet
@@ -206,6 +223,12 @@ class AuthenticityRule(Rule):
 
     TYPE = "authenticity"
     PARAM_KEYS = frozenset({"key_env", "mac_bytes", "spi"})
+    PARAM_SCHEMA = {
+        "key_env": {"type": "string", "required": True,
+                    "help": "NAME of the environment variable holding the hex key (never the key itself)"},
+        "mac_bytes": {"type": "int", "min": 8, "max": 32, "default": 16, "help": "length of the MAC trailer"},
+        "spi": {"type": "int", "min": 0, "max": 0xFFFF, "help": "required Security Parameter Index (optional)"},
+    }
 
     key: bytes = field(repr=False)  # repr=False keeps the key out of logs
     mac_bytes: int = 16

@@ -1,0 +1,207 @@
+{
+  "actions": [
+    "ALLOW",
+    "DENY"
+  ],
+  "match": {
+    "keys": {
+      "apid": {
+        "help": "APID must be one of these",
+        "max": 2047,
+        "min": 0,
+        "type": "int_list"
+      },
+      "apid_range": {
+        "help": "inclusive [low, high]",
+        "max": 2047,
+        "min": 0,
+        "type": "int_pair"
+      },
+      "bytes": {
+        "fields": {
+          "mask": {
+            "default": 255,
+            "max": 255,
+            "min": 0,
+            "type": "int"
+          },
+          "offset": {
+            "max": 65541,
+            "min": 0,
+            "required": true,
+            "type": "int"
+          },
+          "value": {
+            "max": 255,
+            "min": 0,
+            "required": true,
+            "type": "int"
+          }
+        },
+        "help": "(packet[offset] & mask) == value, for every entry",
+        "type": "byte_checks"
+      },
+      "max_length": {
+        "help": "total packet bytes, inclusive",
+        "max": 65542,
+        "min": 7,
+        "type": "int"
+      },
+      "min_length": {
+        "help": "total packet bytes, inclusive",
+        "max": 65542,
+        "min": 7,
+        "type": "int"
+      },
+      "packet_type": {
+        "type": "enum",
+        "values": [
+          "TLM",
+          "CMD"
+        ]
+      },
+      "sec_hdr": {
+        "help": "secondary header flag",
+        "type": "bool"
+      }
+    },
+    "rules": [
+      "apid_range low <= high",
+      "min_length <= max_length",
+      "bytes: value has no bits outside mask"
+    ]
+  },
+  "max_rules": 500,
+  "rule_keys": [
+    "action",
+    "description",
+    "enabled",
+    "id",
+    "match",
+    "params",
+    "type"
+  ],
+  "rule_types": {
+    "authenticity": {
+      "actions": [
+        "DENY"
+      ],
+      "description": "Deny packets without a valid cryptographic signature.",
+      "is_check": true,
+      "param_rules": [],
+      "params": {
+        "key_env": {
+          "help": "NAME of the environment variable holding the hex key (never the key itself)",
+          "required": true,
+          "type": "string"
+        },
+        "mac_bytes": {
+          "default": 16,
+          "help": "length of the MAC trailer",
+          "max": 32,
+          "min": 8,
+          "type": "int"
+        },
+        "spi": {
+          "help": "required Security Parameter Index (optional)",
+          "max": 65535,
+          "min": 0,
+          "type": "int"
+        }
+      }
+    },
+    "match": {
+      "actions": [
+        "ALLOW",
+        "DENY"
+      ],
+      "description": "ALLOW or DENY every packet its match conditions select.",
+      "is_check": false,
+      "param_rules": [],
+      "params": {}
+    },
+    "range": {
+      "actions": [
+        "DENY"
+      ],
+      "description": "Deny packets carrying a physically impossible value.",
+      "is_check": true,
+      "param_rules": [
+        "at least one of min and max",
+        "min <= max"
+      ],
+      "params": {
+        "data_type": {
+          "help": "always big-endian (CCSDS)",
+          "required": true,
+          "type": "enum",
+          "values": [
+            "UINT8",
+            "INT8",
+            "UINT16",
+            "INT16",
+            "UINT32",
+            "INT32",
+            "FLOAT32",
+            "FLOAT64"
+          ]
+        },
+        "max": {
+          "help": "highest allowed value, inclusive",
+          "type": "number"
+        },
+        "min": {
+          "help": "lowest allowed value, inclusive",
+          "type": "number"
+        },
+        "offset": {
+          "help": "byte offset of the value in the whole packet",
+          "max": 65541,
+          "min": 0,
+          "required": true,
+          "type": "int"
+        }
+      }
+    },
+    "rate": {
+      "actions": [
+        "DENY"
+      ],
+      "description": "Deny packets that arrive faster than the spacecraft's beacon cadence.",
+      "is_check": true,
+      "param_rules": [],
+      "params": {
+        "min_interval": {
+          "help": "seconds; set a little below the real cadence to allow jitter",
+          "max": 86400,
+          "min_exclusive": 0,
+          "required": true,
+          "type": "number"
+        }
+      }
+    },
+    "sequence": {
+      "actions": [
+        "DENY"
+      ],
+      "description": "Deny replayed, repeated or reordered packets.",
+      "is_check": true,
+      "param_rules": [],
+      "params": {
+        "max_gap": {
+          "default": 1,
+          "help": "1 accepts only the next count; N also accepts a jump of up to N",
+          "max": 8192,
+          "min": 1,
+          "type": "int"
+        }
+      }
+    }
+  },
+  "top_level_keys": [
+    "default_action",
+    "description",
+    "rules",
+    "version"
+  ]
+}

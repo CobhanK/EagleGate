@@ -7,6 +7,7 @@ from conftest import (HK_STATUS_LENGTH, PLUGIN_TXT, STATUS_3_LENGTH, ccsds, hk_s
                       rules_json, shipped_rules_text, status_3)
 from eaglegate_firewall_protocol import EaglegateFirewallProtocol
 from eaglegate_ccsds_header import CcsdsHeader
+from eaglegate_rules_store import rules_keys
 from openc3.interfaces.interface import Interface
 from openc3.top_level import get_class_from_module
 from openc3.utilities.string import filename_to_class_name, filename_to_module
@@ -36,22 +37,53 @@ class ScriptedInterface(Interface):
 
 
 class FakeRulesStore:
-    """Stands in for the COSMOS config bucket."""
+    """Stands in for eaglegate_rules_store.RulesStore (the COSMOS config bucket).
 
-    def __init__(self, text):
-        self.text = text
+    original: the plugin's rules/firewall_rules.json
+    active:   rules_active.json (only the firewall writes it)
+    pending:  rules_pending.json (what an admin uploads); `text` is an alias,
+              so a test sets store.text and then sends RELOAD_RULES"""
 
-    def read(self):
-        if self.text is None:
-            raise FileNotFoundError("rules file not found")
-        return self.text
+    def __init__(self, original):
+        self.original = original
+        self.active = None
+        self.pending = None
+        self.saved = []           # (version, sha256) of every save_active
+        self.fail_save = False    # make save_active fail, like a bucket outage
+        self.keys = rules_keys("DEFAULT", "EAGLEGATE")
+        self.last_error = None
+
+    @property
+    def text(self):
+        return self.pending
+
+    @text.setter
+    def text(self, value):
+        self.pending = value
+
+    def read_original(self):
+        return self.original
+
+    def read_active(self):
+        return self.active
+
+    def read_pending(self):
+        return self.pending
+
+    def save_active(self, text, version, sha256):
+        if self.fail_save:
+            self.last_error = "ConnectionError: bucket down"
+            return False
+        self.active = text
+        self.saved.append((version, sha256))
+        return True
 
 
 def build(chunks=(), rules=None, connect=True):
     store = FakeRulesStore(shipped_rules_text() if rules is None else rules)
     iface = ScriptedInterface(chunks)
     proto = iface.add_protocol(EaglegateFirewallProtocol, PLUGIN_ARGS, "READ")
-    proto.read_rules_text = store.read
+    proto.store = lambda: store
     if connect:
         iface.connect()  # COSMOS calls connect_reset() on every protocol here
     return iface, proto, store
@@ -85,23 +117,6 @@ def test_plugin_txt_protocol_line_matches_this_class():
     assert words[3:] == PLUGIN_ARGS
 
 
-def test_reads_rules_through_cosmos_target_file(monkeypatch):
-    """The real loader asks TargetFile for the configured path (modified copy first)."""
-    calls = []
-
-    class FakeTargetFile:
-        @staticmethod
-        def body(scope, name):
-            calls.append((scope, name))
-            return shipped_rules_text()
-
-    import openc3.utilities.target_file as tf
-    monkeypatch.setattr(tf, "TargetFile", FakeTargetFile)
-    proto = EaglegateFirewallProtocol(*PLUGIN_ARGS, "TESTSCOPE")
-    assert proto.load_rules()
-    assert calls == [("TESTSCOPE", "EAGLEGATE/rules/firewall_rules.json")]
-
-
 # ---- rules loaded on connect ----
 
 def test_rules_loaded_on_connect():
@@ -118,17 +133,18 @@ def test_no_valid_rules_at_startup_denies_everything(log):
 
 
 def test_missing_rules_file_at_startup_denies_everything():
-    iface, proto, _ = build([hk_status()], connect=False)
-    proto.read_rules_text = FakeRulesStore(None).read
+    iface, proto, _ = build([hk_status()], rules=None, connect=False)
+    proto.store().original = None
     iface.connect()
     assert read_all(iface) == []
+    assert "no rules found" in proto.rules_error
 
 
 def test_reconnect_with_broken_file_keeps_last_known_good():
     """Interfaces reconnect after link drops; a broken file then must not open
     (or close) the firewall. The protocol object, and its rules, survive reconnects."""
     iface, proto, store = build([hk_status()])
-    store.text = None  # file deleted / unreadable
+    store.original = "{broken"  # e.g. a bad plugin upgrade
     iface.connect()
     assert proto.ruleset.version == 1
     assert apids(read_all(iface)) == [2]
@@ -157,10 +173,10 @@ def test_invalid_reload_keeps_last_known_good(log):
 def test_successful_reload_clears_error():
     iface, proto, store = build()
     store.text = "{broken"
-    proto.load_rules()
+    proto.apply_pending()
     assert proto.rules_error
     store.text = rules_json([], version=5)
-    proto.load_rules()
+    proto.apply_pending()
     assert proto.rules_error is None and proto.ruleset.version == 5
 
 
@@ -311,23 +327,108 @@ def test_unchanged_reload_keeps_rule_set_and_clears_old_error():
     _, proto, store = build()
     running = proto.ruleset
     store.text = "{broken"
-    proto.load_rules()
+    proto.apply_pending()
     store.text = shipped_rules_text()
-    assert proto.load_rules()
+    assert proto.apply_pending()
     assert proto.ruleset is running and proto.rules_error is None
 
 
-def test_missing_file_in_cosmos_storage_is_a_rules_error(monkeypatch):
-    class EmptyTargetFile:
-        @staticmethod
-        def body(scope, name):
-            return None
+# ---- pending / active rules (the rules editor's two-phase apply) ----
 
-    import openc3.utilities.target_file as tf
-    monkeypatch.setattr(tf, "TargetFile", EmptyTargetFile)
-    proto = EaglegateFirewallProtocol(*PLUGIN_ARGS, "TESTSCOPE")
-    assert not proto.load_rules()
-    assert "RulesError" in proto.rules_error and "not found" in proto.rules_error
+V2_ALLOW_ALL = rules_json([{"id": "allow-all", "action": "ALLOW", "match": {}}], version=2)
+
+
+def test_valid_pending_becomes_running_and_startup_set():
+    iface, proto, store = build()
+    store.pending = V2_ALLOW_ALL
+    iface.protocol_cmd("RELOAD_RULES", read_write="READ")
+    assert proto.ruleset.version == 2 and proto.rules_source == "pending"
+    assert store.active == V2_ALLOW_ALL and store.saved == [(2, proto.ruleset.sha256)]
+
+
+def test_invalid_pending_never_becomes_the_startup_set():
+    """Otherwise a restart would load it, fail, and deny everything."""
+    iface, proto, store = build()
+    store.pending = "{broken"
+    iface.protocol_cmd("RELOAD_RULES", read_write="READ")
+    assert proto.rules_error and store.active is None and store.saved == []
+    iface.connect()  # restart
+    assert proto.ruleset.version == 1 and proto.rules_source == "original"
+
+
+def test_startup_prefers_active_and_never_loads_pending():
+    iface, proto, store = build(connect=False)
+    store.active = rules_json([], version=4)
+    store.pending = V2_ALLOW_ALL  # uploaded but never applied
+    iface.connect()
+    assert proto.ruleset.version == 4 and proto.rules_source == "active"
+
+
+def test_startup_without_active_uses_plugin_original():
+    _, proto, _ = build()
+    assert proto.ruleset.version == 1 and proto.rules_source == "original"
+
+
+def test_reload_without_pending_rereads_startup_set():
+    iface, proto, store = build()
+    store.active = rules_json([], version=6)
+    iface.protocol_cmd("RELOAD_RULES", read_write="READ")
+    assert proto.ruleset.version == 6 and proto.rules_source == "active"
+
+
+def test_stale_base_sha256_is_refused():
+    """Two admins edit version 1; the second apply must not silently undo the first."""
+    iface, proto, store = build()
+    v1 = proto.ruleset.sha256
+    store.pending = V2_ALLOW_ALL
+    iface.protocol_cmd("RELOAD_RULES", v1, read_write="READ")
+    assert proto.ruleset.version == 2
+    store.pending = rules_json([], version=2)  # the other admin, still based on v1
+    iface.protocol_cmd("RELOAD_RULES", v1, read_write="READ")
+    assert proto.ruleset.version == 2 and "changed by someone else" in proto.rules_error
+    assert store.active == V2_ALLOW_ALL
+
+
+def test_pending_sha256_mismatch_is_refused():
+    iface, proto, store = build()
+    store.pending = V2_ALLOW_ALL
+    iface.protocol_cmd("RELOAD_RULES", proto.ruleset.sha256, "0" * 64, read_write="READ")
+    assert proto.ruleset.version == 1 and "pending rules file changed" in proto.rules_error
+
+
+def test_unset_arguments_from_the_command_line_are_ignored():
+    iface, proto, store = build()
+    store.pending = V2_ALLOW_ALL
+    iface.protocol_cmd("RELOAD_RULES", "None", "", read_write="READ")
+    assert proto.ruleset.version == 2 and proto.rules_error is None
+
+
+def test_reapplying_running_rules_keeps_state_and_saves_active():
+    """Applying the plugin original unchanged makes it the saved startup set
+    without resetting what the sequence and rate rules remember."""
+    iface, proto, store = build()
+    running = proto.ruleset
+    store.pending = shipped_rules_text()
+    iface.protocol_cmd("RELOAD_RULES", running.sha256, running.sha256, read_write="READ")
+    assert proto.ruleset is running and store.active == shipped_rules_text()
+
+
+def test_failed_save_still_applies_but_reports_persist_error(log):
+    iface, proto, store = build()
+    store.fail_save = True
+    store.pending = V2_ALLOW_ALL
+    iface.protocol_cmd("RELOAD_RULES", read_write="READ")
+    assert proto.ruleset.version == 2
+    fw = iface.details()["read_protocols"][0]["firewall"]
+    assert "could not save" in fw["persist_error"] and "bucket down" in fw["persist_error"]
+    assert any(level == "ERROR" and "could not save" in msg for level, msg in log)
+
+
+def test_details_name_the_rule_keys_and_source():
+    iface, _, _ = build()
+    fw = iface.details()["read_protocols"][0]["firewall"]
+    assert fw["rules_keys"]["pending"] == "DEFAULT/eaglegate/EAGLEGATE/rules_pending.json"
+    assert fw["rules_source"] == "original" and fw["persist_error"] is None
 
 
 # ---- fuzz ----

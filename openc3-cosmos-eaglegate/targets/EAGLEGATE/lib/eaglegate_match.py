@@ -8,6 +8,23 @@ from eaglegate_validate import no_unknown_keys, require, to_int
 MATCH_KEYS = {"apid", "apid_range", "packet_type", "sec_hdr", "min_length", "max_length", "bytes"}
 BYTE_KEYS = {"offset", "mask", "value"}
 
+# MATCH_KEYS and BYTE_KEYS described for the rules editor page (rules_schema())
+MATCH_SCHEMA = {
+    "apid": {"type": "int_list", "min": 0, "max": MAX_APID, "help": "APID must be one of these"},
+    "apid_range": {"type": "int_pair", "min": 0, "max": MAX_APID, "help": "inclusive [low, high]"},
+    "packet_type": {"type": "enum", "values": ["TLM", "CMD"]},
+    "sec_hdr": {"type": "bool", "help": "secondary header flag"},
+    "min_length": {"type": "int", "min": MIN_PACKET, "max": MAX_PACKET, "help": "total packet bytes, inclusive"},
+    "max_length": {"type": "int", "min": MIN_PACKET, "max": MAX_PACKET, "help": "total packet bytes, inclusive"},
+    "bytes": {"type": "byte_checks", "help": "(packet[offset] & mask) == value, for every entry",
+              "fields": {
+                  "offset": {"type": "int", "min": 0, "max": MAX_PACKET - 1, "required": True},
+                  "mask": {"type": "int", "min": 0, "max": 0xFF, "default": 0xFF},
+                  "value": {"type": "int", "min": 0, "max": 0xFF, "required": True},
+              }},
+}
+MATCH_RULES = ["apid_range low <= high", "min_length <= max_length", "bytes: value has no bits outside mask"]
+
 
 @dataclass
 class Match:

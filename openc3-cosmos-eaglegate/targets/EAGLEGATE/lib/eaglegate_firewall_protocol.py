@@ -34,20 +34,28 @@ Where rejected packets go (eaglegate_quarantine.py):
     telemetry packet (at most once a second) for operator screens
   * the last few reasons are also in interface_details("EAGLEGATE_INT")
 
-How the rules get loaded (on connect, and on the RELOAD_RULES command):
+How the rules get loaded (eaglegate_rules_store.py has the storage keys and
+why they are admin-only):
 
-  firewall_rules.json -> eaglegate_rules_parser.parse_rules() -> Ruleset
+  on connect:    rules_active.json, or the plugin's rules/firewall_rules.json
+                 until a rule set has been applied
+  RELOAD_RULES:  rules_pending.json (uploaded by an admin); if it is valid it
+                 becomes the running set and is saved as rules_active.json
+
+  text -> eaglegate_rules_parser.parse_rules() -> Ruleset
   (eaglegate_rules_error.RulesError if the file is invalid; the checks
   themselves live in eaglegate_validate.py)
 
-  * loading an UNCHANGED file (same sha256) keeps the running rule set, so
+  * loading UNCHANGED text (same sha256) keeps the running rule set, so
     reconnects never reset what the sequence and rate rules remember; a
     changed file starts them fresh
-
   * an invalid file never replaces a working rule set (last known good is kept);
     if no valid rules were ever loaded, everything is denied (fail closed)
-  * the active version, sha256, per-rule hit counts and any load error are
-    visible via interface_details("EAGLEGATE_INT")
+  * RELOAD_RULES may name the sha256 the editor started from and the sha256 of
+    the file it uploaded; a mismatch (someone else applied or uploaded in the
+    meantime) is refused, so one admin cannot silently overwrite another
+  * the active version, sha256, source, per-rule hit counts and any load error
+    are visible via interface_details("EAGLEGATE_INT")
 
 Packets leaving this protocol are still UNIDENTIFIED; COSMOS identifies them
 afterwards in the interface microservice.
@@ -59,6 +67,7 @@ from eaglegate_ccsds_header import CCSDS_HEADER_BYTES, CcsdsHeader
 from eaglegate_quarantine import RAW_CAPTURE_BYTES, QuarantineWriter, StatusPublisher, header_of, utc_now
 from eaglegate_rules_error import RulesError
 from eaglegate_rules_parser import parse_rules
+from eaglegate_rules_store import RulesStore
 from eaglegate_ruleset import Ruleset
 from eaglegate_verdict import DEFAULT, ERROR, RULE, STRUCTURAL, UNTRUSTED, Verdict
 from openc3.environment import OPENC3_SCOPE
@@ -100,6 +109,9 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.rules_loaded_at = None
         self.rules_error = None
         self.rules_error_at = None
+        self.rules_source = None           # "active", "original" or "pending": where the running set came from
+        self.persist_error = None          # set when an applied set could not be saved as rules_active.json
+        self.rules_store = None            # created on first use, once the scope is final
         self.rejected = 0
         self.rejected_by_stage = {RULE: 0, DEFAULT: 0, ERROR: 0, STRUCTURAL: 0}
         self.discarded_bytes = 0
@@ -300,60 +312,101 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.connection_untrusted = False
         self.untrusted_captured = 0
         self.connection_id += 1  # counts attempts; only connected ones get quarantine entries
-        self.load_rules()
+        self.load_active()
         # Publish only what screens would see change, not once per retry of a dead link
         if self.status_sent_at is None or was_untrusted or self.ruleset is not old_ruleset:
             self._publish_status_if_due(force=True)
 
     def protocol_cmd(self, cmd_name, *cmd_args):
-        """Called for interface_protocol_cmd("EAGLEGATE_INT", "RELOAD_RULES", ...)."""
+        """Called for interface_protocol_cmd("EAGLEGATE_INT", "RELOAD_RULES", ...).
+
+        Optional arguments: the sha256 of the rule set the editor started from,
+        then the sha256 of the pending file it uploaded."""
         if str(cmd_name).upper() == "RELOAD_RULES":
-            self.load_rules()
+            base_sha256, pending_sha256 = (list(map(_optional, cmd_args)) + [None, None])[:2]
+            self.apply_pending(base_sha256, pending_sha256)
             # Runs on the interface's command thread: leave publishing the new
             # RULES_VERSION to the read thread, so only one thread writes the packet
             self.status_due = True
             return True
         return False
 
-    def load_rules(self):
-        """Parse the rules file and swap it in. Returns True on success.
-        On failure the current rule set stays active and the error is recorded."""
+    def load_active(self):
+        """Load the startup rule set: rules_active.json, else the plugin original.
+        Returns True on success; on failure the current rule set stays active."""
         try:
-            new_ruleset = parse_rules(self.read_rules_text())
+            text, source = self.store().read_active(), "active"
+            if text is None:
+                text, source = self.store().read_original(), "original"
+            if text is None:
+                raise RulesError(f"no rules found: neither {self.store().keys['active']} "
+                                 f"nor the plugin's {self.rules_file} exists")
+            new_ruleset = parse_rules(text)
         except Exception as error:
-            self.rules_error = f"{type(error).__name__}: {error}"
-            self.rules_error_at = utc_now()
-            Logger.error(
-                f"{self._name()} firewall: rules NOT loaded ({self.rules_error}); "
-                f"keeping version {self.ruleset.version}"
-                + (" (DENY ALL)" if self.ruleset.version < 0 else "")
-            )
-            return False
+            return self._rules_failed(error)
+        self._swap(new_ruleset, source)
+        return True
+
+    def apply_pending(self, base_sha256=None, pending_sha256=None):
+        """Validate rules_pending.json and make it the running and startup set.
+        Returns True on success; on failure nothing changes and the error is recorded.
+        With no pending file this re-reads the startup set, like a reconnect."""
+        try:
+            text = self.store().read_pending()
+            if text is None:
+                return self.load_active()
+            new_ruleset = parse_rules(text)
+            if pending_sha256 and new_ruleset.sha256 != pending_sha256:
+                raise RulesError("the pending rules file changed after it was uploaded "
+                                 f"(expected sha256 {pending_sha256[:12]}, found {new_ruleset.sha256[:12]}); "
+                                 "someone else may be editing the rules, reload and try again")
+            if base_sha256 and base_sha256 != self.ruleset.sha256 and new_ruleset.sha256 != self.ruleset.sha256:
+                raise RulesError(f"the rules were changed by someone else (you edited sha256 {base_sha256[:12]}, "
+                                 f"running is {self.ruleset.sha256[:12]} version {self.ruleset.version}); "
+                                 "reload and apply your changes again")
+        except Exception as error:
+            return self._rules_failed(error)
+        if self.store().save_active(text, new_ruleset.version, new_ruleset.sha256):
+            self.persist_error = None
+        else:
+            # Running now, but a restart would bring back the previous set: say so loudly
+            self.persist_error = f"could not save {self.store().keys['active']}: {self.store().last_error}"
+            Logger.error(f"{self._name()} firewall: {self.persist_error}")
+        self._swap(new_ruleset, "pending")
+        return True
+
+    def _rules_failed(self, error):
+        self.rules_error = f"{type(error).__name__}: {error}"
+        self.rules_error_at = utc_now()
+        Logger.error(
+            f"{self._name()} firewall: rules NOT loaded ({self.rules_error}); "
+            f"keeping version {self.ruleset.version}"
+            + (" (DENY ALL)" if self.ruleset.version < 0 else "")
+        )
+        return False
+
+    def _swap(self, new_ruleset, source):
         self.rules_error = None
         self.rules_error_at = None
+        self.rules_source = source
         if new_ruleset.sha256 == self.ruleset.sha256:
-            # Same file: keep the running set, so what the sequence and rate rules
+            # Same text: keep the running set, so what the sequence and rate rules
             # remember survives reconnects (a reset would let one replay through)
-            return True
+            return
         old_version = self.ruleset.version
         # A single assignment: read_data sees the old or the new set, never a mix
         self.ruleset = new_ruleset
         self.rules_loaded_at = utc_now()
         Logger.info(
             f"{self._name()} firewall: rules version {old_version} -> {new_ruleset.version} "
-            f"({len(new_ruleset.rules)} active rules, sha256 {new_ruleset.sha256[:12]})"
+            f"from {source} ({len(new_ruleset.rules)} active rules, sha256 {new_ruleset.sha256[:12]})"
         )
-        return True
 
-    def read_rules_text(self):
-        """Read the rules file: user-modified copy first, then the plugin original.
-        Separate method so tests can replace it without a COSMOS bucket."""
-        from openc3.utilities.target_file import TargetFile
-
-        body = TargetFile.body(self.scope, self.rules_file)
-        if body is None:
-            raise RulesError(f"rules file {self.rules_file} not found")
-        return body
+    def store(self):
+        """The COSMOS storage for the rules. Tests replace it with a fake."""
+        if self.rules_store is None:
+            self.rules_store = RulesStore(self.scope, self.target_name, self.rules_file)
+        return self.rules_store
 
     # ---- status --------------------------------------------------------------
 
@@ -362,10 +415,13 @@ class EaglegateFirewallProtocol(LengthProtocol):
         result = super().read_details()
         result["firewall"] = {
             "rules_file": self.rules_file,
+            "rules_keys": self.store().keys,
+            "rules_source": self.rules_source,
             "rules": self.ruleset.summary(),
             "rules_loaded_at": self.rules_loaded_at,
             "rules_error": self.rules_error,
             "rules_error_at": self.rules_error_at,
+            "persist_error": self.persist_error,
             "rejected": self.rejected,
             "rejected_by_stage": dict(self.rejected_by_stage),
             "discarded_bytes": self.discarded_bytes,
@@ -386,6 +442,11 @@ class EaglegateFirewallProtocol(LengthProtocol):
 
     def _name(self):
         return self.interface.name if self.interface else "?"
+
+
+def _optional(arg):
+    """interface_protocol_cmd arguments arrive as strings; "", None and "None" mean unset."""
+    return None if arg in (None, "", "None", "nil") else str(arg)
 
 
 def _u32(count):
