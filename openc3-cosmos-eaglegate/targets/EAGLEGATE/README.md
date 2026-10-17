@@ -86,7 +86,66 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
 
 **The tool page** (Tools menu → EagleGate Firewall) shows the running version, source, hit counts and errors. It edits rules through forms generated from `public/eaglegate_rules_schema.json`, warns about check rules placed below an ALLOW for the same packets, deny-all and default-allow, and raises `version` automatically. It shows a diff before applying and can restore any history version (through the same apply). Its validation only gives early feedback; the Python parser decides.
 
-**Recovery.** To go back to the plugin's original rules, delete `rules_active.json` (Bucket Explorer, as an admin) and reconnect the interface. After a plugin upgrade, new defaults in `rules/firewall_rules.json` are **not** used while `rules_active.json` exists; apply them from the page if you want them.
+**Signing (optional, recommended).** With a key in `EAGLEGATE_RULES_KEY` (`lib/eaglegate_rules_signing.py`; setup is in `plugin.txt`):
+- The firewall stores an HMAC-SHA256 of every rule set it activates, as metadata on `rules_active.json` itself, so the file and its signature always change together.
+- It only loads a correctly signed active file. A file edited directly in the bucket, signed with another key, carrying a signature made for a different key, or missing its signature is refused: the firewall keeps the running rules, or denies everything on a fresh start. It never falls back to the unsigned plugin original.
+- After enabling signing, apply the rules once from the page; until then the firewall denies everything.
+- The tool page shows whether signing is on and whether the running rules are signed.
+
+**Signing: how to use it.**
+
+*Turn it on (once per installation):*
+1. Generate a key: `openssl rand -hex 32` (64 hex characters; the firewall requires at least 32 bytes).
+2. In COSMOS go to **Admin → Secrets** and create a secret named `EAGLEGATE_RULES_KEY` with that value. Keep a copy in your team's password manager: it is not shown again, and losing it means re-applying the rules under a new key.
+3. In `plugin.txt` uncomment `SECRET ENV EAGLEGATE_RULES_KEY EAGLEGATE_RULES_KEY`, rebuild and reinstall the plugin.
+4. Open **EagleGate Firewall**. The page shows the firewall is denying everything because it has no signed rules. Review the rules and click **Review and apply** (it works without edits in this state). The sha256 then shows a green **signed** chip.
+
+*Day to day:* nothing changes. Edit and apply as usual and every applied version is signed automatically.
+
+*Rotate the key:*
+1. Replace the value of the `EAGLEGATE_RULES_KEY` secret and restart the interface (Admin → Interfaces, or reinstall the plugin) so it picks up the new key.
+2. The old `rules_active.json` now fails its check, so the firewall denies everything on a fresh start. Apply the rules again from the page, which signs them with the new key. Do this right after the restart to keep the gap short.
+
+*Turn it off:* comment out the `SECRET ENV` line and reinstall. The firewall goes back to loading `rules_active.json` unsigned. Applying again clears the old signature.
+
+*When the page says a file "failed its signature check":* the active file was changed outside EagleGate, or the key changed. Don't trust it. Look at the stored rules (the page shows a warning and the diff), load a known good version from **History** if in doubt, and apply. Also check who has access to the COSMOS bucket credentials.
+
+*When the page says rules signing is misconfigured:* the key isn't valid hex or is shorter than 32 bytes. Fix the secret and restart the interface; nothing loads or applies until then.
+
+*Checking it from a script:* `interface_details("EAGLEGATE_INT")` has `rules_signing` with `enabled`, `key_env`, `error` and `running_signed` (never the key).
+
+**Recovery.**
+- Signing off: to go back to the plugin's original rules, delete `rules_active.json` (Bucket Explorer, as an admin) and reconnect the interface.
+- Signing on: open the tool page and apply rules. Load a version from History, or the plugin original, which the page shows when the firewall runs nothing. Applying is allowed even without edits while the firewall is denying everything.
+- After a plugin upgrade, new defaults in `rules/firewall_rules.json` are **not** used while `rules_active.json` exists; apply them from the page if you want them.
+
+**Security controls for rule changes:**
+
+| # | Control | What it stops |
+|---|---|---|
+| 1 | The firewall reads only admin-only bucket keys, never `targets_modified` | Operators changing the firewall by editing the draft file |
+| 2 | COSMOS storage API: upload needs the admin role (Enterprise) / a valid login (Core) | Non-admins uploading rules, including by calling the API directly (403) |
+| 3 | `RELOAD_RULES` only loads what an admin uploaded; it needs `system_set` | Triggering a reload achieves nothing on its own |
+| 4 | Strict parser: unknown keys, bad values and duplicate ids are errors | Typos silently turning into "match everything" |
+| 5 | Two-phase apply: only a validated file becomes `rules_active.json`; pending is never loaded at startup | A bad upload causing deny-all after a restart |
+| 6 | Last-known-good: a refused file never replaces the running rules | Losing filtering because of a bad edit |
+| 7 | Fail closed: no trustworthy rules means deny everything | Running without a firewall |
+| 8 | `base_sha256` / `pending_sha256` checks on apply | One admin silently overwriting another's change |
+| 9 | HMAC signature on `rules_active.json` (when enabled), bound to its bucket key | Direct bucket edits, swapped files, wrong keys |
+| 10 | Rollback check on reconnect (signing on) | Putting back an older signed copy while the firewall runs |
+| 11 | Keys only in COSMOS secrets/env, never in rule files, details, logs or the page | Leaking the signing or authenticity keys |
+| 12 | Unchanged rules keep sequence/rate state | Resetting replay protection by re-applying or reconnecting |
+| 13 | Diff and warnings before apply (shadowed checks, deny-all, default ALLOW) | Valid-but-wrong rule sets |
+| 14 | History of applied versions, plus version and sha256 in details, the page and `FIREWALL_STATUS` | Confusion about what is running; slow recovery |
+| 15 | COSMOS logs every upload-URL request with the username | No record of who changed the rules |
+| 16 | Read-only page for Enterprise non-admins; no `v-html` | Accidental edits; script injection through rule text |
+
+**Known limits:**
+- **COSMOS Core has no admin role:** anyone with the COSMOS password can change the rules.
+- **Signing off:** direct bucket access can change the rules undetected.
+- **Signing on:** an older signed copy put back *while the firewall is stopped* is accepted at the next start. The firewall has nothing to compare against after a restart.
+- **History copies are not signed.** A restore always goes through review and apply, so check the diff.
+- **EagleGate cannot see who applied a change.** Use the COSMOS logs (control 15).
 
 **Other details:**
 - Rules load on every connect attempt (`connect_reset`) and on the `RELOAD_RULES` protocol command.

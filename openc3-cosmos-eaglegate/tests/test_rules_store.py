@@ -14,18 +14,20 @@ class FakeBucket:
 
     def __init__(self):
         self.objects = {}
+        self.metadata = {}
         self.fail = False
 
     def get_object(self, bucket, key):
         assert bucket == "config"
         if key not in self.objects:
             return None  # what the real client returns for NoSuchKey
-        return {"Body": io.BytesIO(self.objects[key])}
+        return {"Body": io.BytesIO(self.objects[key]), "Metadata": self.metadata.get(key, {})}
 
-    def put_object(self, bucket, key, body, content_type=None):
+    def put_object(self, bucket, key, body, content_type=None, metadata=None):
         if self.fail:
             raise ConnectionError("bucket down")
         self.objects[key] = body
+        self.metadata[key] = dict(metadata or {})  # like S3: a put replaces the metadata
 
     def list_objects(self, bucket, prefix=None):
         return [{"Key": key} for key in self.objects if key.startswith(prefix)]
@@ -58,7 +60,7 @@ def test_keys_are_outside_targets_modified():
 
 def test_missing_keys_read_as_none(bucket):
     store = make_store()
-    assert store.read_pending() is None and store.read_active() is None
+    assert store.read_pending() is None and store.read_active() == (None, None)
 
 
 def test_original_is_the_installed_plugin_file(bucket):
@@ -69,8 +71,9 @@ def test_original_is_the_installed_plugin_file(bucket):
 
 def test_save_active_writes_active_and_history(bucket):
     store = make_store()
-    assert store.save_active('{"version": 3}', 3, "ab" * 32)
+    assert store.save_active('{"version": 3}', 3, "ab" * 32, signature="cafe")
     assert bucket.objects["DEFAULT/eaglegate/EAGLEGATE/rules_active.json"] == b'{"version": 3}'
+    assert store.read_active() == (b'{"version": 3}', "cafe")  # file and signature in one object
     assert bucket.objects["DEFAULT/eaglegate/EAGLEGATE/history/000003-abababababab.json"] == b'{"version": 3}'
 
 
@@ -101,3 +104,19 @@ def test_protocol_reads_through_the_real_store(bucket, valkey):
     assert proto.apply_pending()
     restarted = EaglegateFirewallProtocol("1024", "EAGLEGATE/rules/firewall_rules.json", "DEFAULT")
     assert restarted.load_active() and restarted.ruleset.version == 2 and restarted.rules_source == "active"
+
+
+def test_signed_apply_and_restart_through_the_real_store(bucket, valkey, monkeypatch):
+    """The signature travels as S3 metadata on rules_active.json itself."""
+    monkeypatch.setenv("EAGLEGATE_RULES_KEY", "33" * 32)
+    proto = EaglegateFirewallProtocol("1024", "EAGLEGATE/rules/firewall_rules.json", "DEFAULT")
+    v2 = json.dumps({"version": 2, "default_action": "DENY", "rules": []})
+    bucket.objects["DEFAULT/eaglegate/EAGLEGATE/rules_pending.json"] = v2.encode()
+    assert proto.apply_pending()
+    active = "DEFAULT/eaglegate/EAGLEGATE/rules_active.json"
+    assert len(bucket.metadata[active]["eaglegate-hmac"]) == 64
+    restarted = EaglegateFirewallProtocol("1024", "EAGLEGATE/rules/firewall_rules.json", "DEFAULT")
+    assert restarted.load_active() and restarted.ruleset.version == 2
+    bucket.put_object("config", active, b'{"version": 9, "default_action": "ALLOW", "rules": []}')  # no metadata
+    tampered = EaglegateFirewallProtocol("1024", "EAGLEGATE/rules/firewall_rules.json", "DEFAULT")
+    assert not tampered.load_active() and tampered.ruleset.version == -1

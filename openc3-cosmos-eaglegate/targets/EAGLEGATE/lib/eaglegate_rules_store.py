@@ -7,6 +7,7 @@ The rules are kept in the COSMOS config bucket OUTSIDE targets_modified:
                                                   apply_firewall_rules procedure)
   {scope}/eaglegate/{TARGET}/rules_active.json    written ONLY by the firewall,
                                                   after the pending file validated
+                                                  (and signed, see eaglegate_rules_signing.py)
   {scope}/eaglegate/{TARGET}/history/...          a copy of every version that
                                                   became active, for rollback
 
@@ -20,6 +21,7 @@ set has been applied. The pending file is never loaded at startup, so an
 invalid upload cannot leave the firewall denying everything after a restart.
 """
 from eaglegate_quarantine import _Guarded
+from eaglegate_rules_signing import SIGNATURE_METADATA
 
 HISTORY_KEEP = 50  # newest active versions kept in history/
 
@@ -53,16 +55,20 @@ class RulesStore(_Guarded):
         return self._get(self.keys["pending"])
 
     def read_active(self):
-        return self._get(self.keys["active"])
+        """(text, signature) of rules_active.json; (None, None) when missing.
+        One read, so the text and its signature always belong together."""
+        return self._get_signed(self.keys["active"])
 
     def read_original(self):
         return self._get(f"{self.scope}/targets/{self.original_path}")
 
-    def save_active(self, text, version, sha256):
+    def save_active(self, text, version, sha256, signature=None):
         """Make text the startup rule set and keep a copy in history.
-        Returns True when the active copy was written."""
+        The signature is stored as metadata on the same object, so the file and
+        its signature are replaced in one write. Returns True when written."""
         try:
-            self._put(self.keys["active"], text)
+            metadata = {SIGNATURE_METADATA: signature} if signature else None
+            self._put(self.keys["active"], text, metadata)
         except Exception as error:
             self._failed(error)
             return False
@@ -87,16 +93,21 @@ class RulesStore(_Guarded):
         return Bucket.get_client(), OPENC3_CONFIG_BUCKET
 
     def _get(self, key):
+        return self._get_signed(key)[0]
+
+    def _get_signed(self, key):
         client, bucket = self._bucket()
         response = client.get_object(bucket=bucket, key=key)
         if not response or not response.get("Body"):
-            return None
-        return response["Body"].read()
+            return None, None
+        # S3 returns user metadata with lower-cased keys and no x-amz-meta- prefix
+        metadata = {k.lower(): v for k, v in (response.get("Metadata") or {}).items()}
+        return response["Body"].read(), metadata.get(SIGNATURE_METADATA)
 
-    def _put(self, key, text):
+    def _put(self, key, text, metadata=None):
         client, bucket = self._bucket()
         body = text.encode("utf-8") if isinstance(text, str) else text
-        client.put_object(bucket=bucket, key=key, body=body, content_type="application/json")
+        client.put_object(bucket=bucket, key=key, body=body, content_type="application/json", metadata=metadata)
 
     def _list(self, prefix):
         client, bucket = self._bucket()

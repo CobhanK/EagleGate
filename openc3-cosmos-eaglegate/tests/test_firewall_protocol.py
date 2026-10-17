@@ -47,6 +47,7 @@ class FakeRulesStore:
     def __init__(self, original):
         self.original = original
         self.active = None
+        self.active_signature = None  # the HMAC stored as metadata on the active object
         self.pending = None
         self.saved = []           # (version, sha256) of every save_active
         self.fail_save = False    # make save_active fail, like a bucket outage
@@ -65,16 +66,17 @@ class FakeRulesStore:
         return self.original
 
     def read_active(self):
-        return self.active
+        return self.active, self.active_signature
 
     def read_pending(self):
         return self.pending
 
-    def save_active(self, text, version, sha256):
+    def save_active(self, text, version, sha256, signature=None):
         if self.fail_save:
             self.last_error = "ConnectionError: bucket down"
             return False
         self.active = text
+        self.active_signature = signature
         self.saved.append((version, sha256))
         return True
 

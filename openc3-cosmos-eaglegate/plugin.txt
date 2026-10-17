@@ -25,6 +25,11 @@ INTERFACE <%= eaglegate_target_name %>_INT openc3/interfaces/tcpip_client_interf
   # Key for "authenticity" rules (hex). Create the secret in Admin > Secrets,
   # then uncomment so the rule's "key_env" can read it:
   # SECRET ENV EAGLEGATE_AUTH_KEY EAGLEGATE_AUTH_KEY
+  # Sign the applied firewall rules so a file changed directly in the COSMOS
+  # bucket is refused (see lib/eaglegate_rules_signing.py). Create a secret
+  # EAGLEGATE_RULES_KEY holding 32+ random bytes as hex (e.g. `openssl rand -hex 32`),
+  # uncomment, then apply the rules once from the EagleGate Firewall page:
+  # SECRET ENV EAGLEGATE_RULES_KEY EAGLEGATE_RULES_KEY
 
 #Initial Skeleton
 #INTERFACE <%= eaglegate_target_name %>_INT openc3/interfaces/tcpip_client_interface.py host.docker.internal 8080 8081 10.0 None BURST

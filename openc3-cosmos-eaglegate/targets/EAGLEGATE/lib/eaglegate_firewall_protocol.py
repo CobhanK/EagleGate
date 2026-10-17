@@ -51,6 +51,9 @@ why they are admin-only):
     changed file starts them fresh
   * an invalid file never replaces a working rule set (last known good is kept);
     if no valid rules were ever loaded, everything is denied (fail closed)
+  * with a signing key configured (eaglegate_rules_signing.py) the firewall
+    signs every set it activates and only loads a correctly signed
+    rules_active.json: a file changed directly in the bucket is refused
   * RELOAD_RULES may name the sha256 the editor started from and the sha256 of
     the file it uploaded; a mismatch (someone else applied or uploaded in the
     meantime) is refused, so one admin cannot silently overwrite another
@@ -67,6 +70,7 @@ from eaglegate_ccsds_header import CCSDS_HEADER_BYTES, CcsdsHeader
 from eaglegate_quarantine import RAW_CAPTURE_BYTES, QuarantineWriter, StatusPublisher, header_of, utc_now
 from eaglegate_rules_error import RulesError
 from eaglegate_rules_parser import parse_rules
+from eaglegate_rules_signing import RulesSigner
 from eaglegate_rules_store import RulesStore
 from eaglegate_ruleset import Ruleset
 from eaglegate_verdict import DEFAULT, ERROR, RULE, STRUCTURAL, UNTRUSTED, Verdict
@@ -112,6 +116,8 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.rules_source = None           # "active", "original" or "pending": where the running set came from
         self.persist_error = None          # set when an applied set could not be saved as rules_active.json
         self.rules_store = None            # created on first use, once the scope is final
+        self.signer = RulesSigner()        # reads EAGLEGATE_RULES_KEY; disabled when unset
+        self.rules_signed = False          # the running set was verified, or signed when applied
         self.rejected = 0
         self.rejected_by_stage = {RULE: 0, DEFAULT: 0, ERROR: 0, STRUCTURAL: 0}
         self.discarded_bytes = 0
@@ -333,19 +339,42 @@ class EaglegateFirewallProtocol(LengthProtocol):
 
     def load_active(self):
         """Load the startup rule set: rules_active.json, else the plugin original.
+        With signing on, ONLY a correctly signed rules_active.json is loaded.
         Returns True on success; on failure the current rule set stays active."""
         try:
-            text, source = self.store().read_active(), "active"
-            if text is None:
+            text, signature = self.store().read_active()
+            source = "active"
+            if self.signer.enabled:
+                self._check_signature(text, signature)
+            elif text is None:
                 text, source = self.store().read_original(), "original"
             if text is None:
                 raise RulesError(f"no rules found: neither {self.store().keys['active']} "
                                  f"nor the plugin's {self.rules_file} exists")
             new_ruleset = parse_rules(text)
+            if self.signer.enabled and 0 <= new_ruleset.version < self.ruleset.version:
+                # A valid signature on an OLD file: someone put back a previous copy
+                raise RulesError(f"{self.store().keys['active']} is version {new_ruleset.version}, older than "
+                                 f"the running version {self.ruleset.version}; refusing a rollback. "
+                                 "Restore older rules from the EagleGate Firewall page instead")
         except Exception as error:
             return self._rules_failed(error)
         self._swap(new_ruleset, source)
+        self.rules_signed = self.signer.enabled
         return True
+
+    def _check_signature(self, text, signature):
+        key = self.store().keys["active"]
+        if not self.signer.usable:
+            raise RulesError(f"rules signing is misconfigured ({self.signer.error}); "
+                             "loading no rules until it is fixed")
+        if text is None:
+            raise RulesError(f"rules signing is on, but there is no signed {key} yet; "
+                             "apply the rules from the EagleGate Firewall page to create it")
+        if not self.signer.verify(key, text, signature):
+            raise RulesError(f"{key} failed its signature check: it was changed outside EagleGate "
+                             "(or signed with a different key). Re-apply the rules from the "
+                             "EagleGate Firewall page")
 
     def apply_pending(self, base_sha256=None, pending_sha256=None):
         """Validate rules_pending.json and make it the running and startup set.
@@ -355,6 +384,9 @@ class EaglegateFirewallProtocol(LengthProtocol):
             text = self.store().read_pending()
             if text is None:
                 return self.load_active()
+            if self.signer.enabled and not self.signer.usable:
+                # An unsigned active file would be refused at the next restart
+                raise RulesError(f"rules signing is misconfigured ({self.signer.error}); cannot apply")
             new_ruleset = parse_rules(text)
             if pending_sha256 and new_ruleset.sha256 != pending_sha256:
                 raise RulesError("the pending rules file changed after it was uploaded "
@@ -366,13 +398,15 @@ class EaglegateFirewallProtocol(LengthProtocol):
                                  "reload and apply your changes again")
         except Exception as error:
             return self._rules_failed(error)
-        if self.store().save_active(text, new_ruleset.version, new_ruleset.sha256):
+        signature = self.signer.sign(self.store().keys["active"], text) if self.signer.usable else None
+        if self.store().save_active(text, new_ruleset.version, new_ruleset.sha256, signature):
             self.persist_error = None
         else:
             # Running now, but a restart would bring back the previous set: say so loudly
             self.persist_error = f"could not save {self.store().keys['active']}: {self.store().last_error}"
             Logger.error(f"{self._name()} firewall: {self.persist_error}")
         self._swap(new_ruleset, "pending")
+        self.rules_signed = signature is not None
         return True
 
     def _rules_failed(self, error):
@@ -422,6 +456,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "rules_error": self.rules_error,
             "rules_error_at": self.rules_error_at,
             "persist_error": self.persist_error,
+            "rules_signing": {**self.signer.summary(), "running_signed": self.rules_signed},
             "rejected": self.rejected,
             "rejected_by_stage": dict(self.rejected_by_stage),
             "discarded_bytes": self.discarded_bytes,

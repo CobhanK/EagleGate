@@ -60,6 +60,16 @@
           <v-col cols="6" md="3">
             <div class="text-caption">sha256</div>
             <code>{{ (state.rules.sha256 || '-').slice(0, 12) }}</code>
+            <v-chip
+              v-if="signing.enabled"
+              size="x-small"
+              class="ml-2"
+              :color="state.rules_signing?.running_signed ? 'success' : 'error'"
+            >
+              {{
+                state.rules_signing?.running_signed ? 'signed' : 'not signed'
+              }}
+            </v-chip>
           </v-col>
           <v-col cols="6" md="2"
             ><div class="text-caption">Loaded from</div>
@@ -96,6 +106,38 @@
           {{ state.persist_error }}
         </v-alert>
         <v-alert
+          v-if="signing.error"
+          type="error"
+          variant="tonal"
+          density="compact"
+          class="mt-2"
+        >
+          Rules signing is misconfigured, so the firewall loads and applies no
+          rules: {{ signing.error }}
+        </v-alert>
+        <v-alert
+          v-else-if="!signing.enabled && !readonly"
+          type="info"
+          variant="tonal"
+          density="compact"
+          class="mt-2"
+        >
+          Rules signing is off: anyone with direct access to the COSMOS bucket
+          (its credentials, or root on the host) could change the active rules
+          without EagleGate noticing. Set up {{ signing.key_env }} as described
+          in plugin.txt to turn it on.
+        </v-alert>
+        <v-alert
+          v-if="state.rules.version < 0 && !readonly"
+          type="error"
+          variant="tonal"
+          density="compact"
+          class="mt-2"
+        >
+          The firewall is denying all telemetry because it has no rules it can
+          trust. Review the rules below and apply them to restore filtering.
+        </v-alert>
+        <v-alert
           v-if="state.connection_untrusted"
           type="warning"
           variant="tonal"
@@ -114,7 +156,9 @@
           class="mt-2"
         >
           The stored rules differ from what the firewall is running (it may have
-          refused a newer file). The editor shows the stored file.
+          refused a newer file). The editor shows the stored file, which may
+          have been changed outside EagleGate: check the diff before applying,
+          or load a known good version from History.
         </v-alert>
       </v-card-text>
     </v-card>
@@ -308,7 +352,7 @@
         <v-btn
           color="primary"
           variant="flat"
-          :disabled="!dirty || errors.length > 0"
+          :disabled="!canApply || errors.length > 0"
           @click="review"
         >
           Review and apply
@@ -500,6 +544,20 @@ export default {
     },
     dirty() {
       return this.doc !== null && toFileText(this.doc) !== this.runningNormal
+    },
+    // Unchanged rules can still be applied when the firewall runs none: that is
+    // how signing is bootstrapped and how a tampered active file is replaced
+    canApply() {
+      return this.dirty || (this.state !== null && this.state.rules.version < 0)
+    },
+    signing() {
+      return (
+        this.state?.rules_signing || {
+          enabled: false,
+          error: null,
+          key_env: 'EAGLEGATE_RULES_KEY',
+        }
+      )
     },
     errors() {
       return this.doc && this.schema ? validate(this.doc, this.schema) : []
