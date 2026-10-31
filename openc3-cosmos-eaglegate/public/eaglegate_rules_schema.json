@@ -108,7 +108,8 @@
           "min": 0,
           "type": "int"
         }
-      }
+      },
+      "presets": []
     },
     "match": {
       "actions": [
@@ -118,7 +119,8 @@
       "description": "ALLOW or DENY every packet its match conditions select.",
       "is_check": false,
       "param_rules": [],
-      "params": {}
+      "params": {},
+      "presets": []
     },
     "range": {
       "actions": [
@@ -161,7 +163,8 @@
           "required": true,
           "type": "int"
         }
-      }
+      },
+      "presets": []
     },
     "rate": {
       "actions": [
@@ -178,7 +181,8 @@
           "required": true,
           "type": "number"
         }
-      }
+      },
+      "presets": []
     },
     "sequence": {
       "actions": [
@@ -195,8 +199,365 @@
           "min": 1,
           "type": "int"
         }
-      }
+      },
+      "presets": []
+    },
+    "text": {
+      "actions": [
+        "DENY"
+      ],
+      "description": "Deny packets whose text fields contain characters they should not.",
+      "is_check": true,
+      "param_rules": [
+        "min_length <= max_length",
+        "profile custom needs also_allow",
+        "settings marked ascii/utf8 or raw apply only to that encoding"
+      ],
+      "params": {
+        "allow_bytes": {
+          "encodings": [
+            "raw"
+          ],
+          "help": "allowed byte values, e.g. 0x20-0x7E, 0x0A (empty: every byte)",
+          "type": "byte_set"
+        },
+        "also_allow": {
+          "encodings": [
+            "ascii",
+            "utf8"
+          ],
+          "help": "characters to add to the profile, e.g. \"A-Z_ \" (- is literal at the start or end)",
+          "type": "charset"
+        },
+        "also_deny": {
+          "encodings": [
+            "ascii",
+            "utf8"
+          ],
+          "help": "characters to remove from the profile",
+          "type": "charset"
+        },
+        "deny_bytes": {
+          "encodings": [
+            "raw"
+          ],
+          "help": "byte values to refuse, e.g. 0x1B, 0x7F",
+          "type": "byte_set"
+        },
+        "deny_substrings": {
+          "help": "text: literal, case-insensitive; raw: hex like 1b5b",
+          "max_items": 20,
+          "type": "string_list"
+        },
+        "encoding": {
+          "default": "ascii",
+          "type": "enum",
+          "value_help": {
+            "ascii": "printable ASCII only (most flight software)",
+            "raw": "binary data: allow or deny byte values",
+            "utf8": "ASCII rules plus safe non-ASCII characters"
+          },
+          "values": [
+            "ascii",
+            "utf8",
+            "raw"
+          ]
+        },
+        "fields": {
+          "fields": {
+            "length": {
+              "help": "field size in bytes (the STRING item's bit size / 8)",
+              "max": 65542,
+              "min": 1,
+              "required": true,
+              "type": "int"
+            },
+            "name": {
+              "help": "shown in reasons, e.g. the item name in tlm.txt (letters, digits, _)",
+              "type": "string"
+            },
+            "offset": {
+              "help": "byte offset of the field in the whole packet",
+              "max": 65541,
+              "min": 0,
+              "required": true,
+              "type": "int"
+            }
+          },
+          "help": "the text fields to check, from the packet's STRING items",
+          "max_items": 32,
+          "min_items": 1,
+          "required": true,
+          "type": "object_list"
+        },
+        "max_length": {
+          "help": "bytes, after padding is removed",
+          "max": 65542,
+          "min": 0,
+          "type": "int"
+        },
+        "min_length": {
+          "help": "bytes, after padding is removed",
+          "max": 65542,
+          "min": 0,
+          "type": "int"
+        },
+        "no_formula_start": {
+          "default": true,
+          "encodings": [
+            "ascii",
+            "utf8"
+          ],
+          "help": "refuse a first character of = + - @ (CSV formula injection)",
+          "type": "bool"
+        },
+        "padding": {
+          "default": "nul",
+          "type": "enum",
+          "value_help": {
+            "none": "the whole field is text",
+            "nul": "trailing NULs; nothing may follow the first NUL",
+            "space": "trailing spaces"
+          },
+          "values": [
+            "nul",
+            "space",
+            "none"
+          ]
+        },
+        "profile": {
+          "default": "safe_text",
+          "encodings": [
+            "ascii",
+            "utf8"
+          ],
+          "type": "enum",
+          "value_help": {
+            "custom": "only the characters listed in also_allow",
+            "hex": "0-9 A-F a-f: serial numbers, hashes",
+            "identifier": "letters, digits, _ . - (not starting with - or .): mode names, component IDs",
+            "numeric": "digits and . + - e E: numbers sent as text, entity IDs",
+            "path": "letters, digits, _ . - / (not starting with -): file names",
+            "printable": "any printable character: text that is only ever displayed",
+            "safe_text": "printable without ; | & $ ` < > \\ ' \" { } %: text that may reach scripts, CSV or SQL"
+          },
+          "values": [
+            "identifier",
+            "path",
+            "hex",
+            "numeric",
+            "printable",
+            "safe_text",
+            "custom"
+          ]
+        }
+      },
+      "presets": [
+        {
+          "name": "text-identifier",
+          "params": {
+            "encoding": "ascii",
+            "fields": [
+              {
+                "length": 32,
+                "name": "FIELD",
+                "offset": 12
+              }
+            ],
+            "min_length": 1,
+            "no_formula_start": true,
+            "padding": "nul",
+            "profile": "identifier"
+          },
+          "title": "Text: identifier (names, modes, IDs)"
+        },
+        {
+          "name": "text-path",
+          "params": {
+            "deny_substrings": [
+              ".."
+            ],
+            "encoding": "ascii",
+            "fields": [
+              {
+                "length": 32,
+                "name": "FIELD",
+                "offset": 12
+              }
+            ],
+            "min_length": 1,
+            "no_formula_start": true,
+            "padding": "nul",
+            "profile": "path"
+          },
+          "title": "Text: file path (no ..)"
+        },
+        {
+          "name": "text-safe",
+          "params": {
+            "encoding": "ascii",
+            "fields": [
+              {
+                "length": 32,
+                "name": "FIELD",
+                "offset": 12
+              }
+            ],
+            "no_formula_start": true,
+            "padding": "nul",
+            "profile": "safe_text"
+          },
+          "title": "Text: safe text (scripts, CSV, SQL)"
+        },
+        {
+          "name": "text-printable",
+          "params": {
+            "encoding": "ascii",
+            "fields": [
+              {
+                "length": 32,
+                "name": "FIELD",
+                "offset": 12
+              }
+            ],
+            "no_formula_start": true,
+            "padding": "nul",
+            "profile": "printable"
+          },
+          "title": "Text: printable (display only)"
+        },
+        {
+          "name": "text-hex",
+          "params": {
+            "encoding": "ascii",
+            "fields": [
+              {
+                "length": 32,
+                "name": "FIELD",
+                "offset": 12
+              }
+            ],
+            "min_length": 1,
+            "no_formula_start": true,
+            "padding": "nul",
+            "profile": "hex"
+          },
+          "title": "Text: hex"
+        },
+        {
+          "name": "text-numeric",
+          "params": {
+            "encoding": "ascii",
+            "fields": [
+              {
+                "length": 32,
+                "name": "FIELD",
+                "offset": 12
+              }
+            ],
+            "min_length": 1,
+            "no_formula_start": true,
+            "padding": "nul",
+            "profile": "numeric"
+          },
+          "title": "Text: number as text"
+        },
+        {
+          "name": "text-utf8",
+          "params": {
+            "encoding": "utf8",
+            "fields": [
+              {
+                "length": 32,
+                "name": "FIELD",
+                "offset": 12
+              }
+            ],
+            "no_formula_start": true,
+            "padding": "nul",
+            "profile": "safe_text"
+          },
+          "title": "Text: UTF-8 safe text (non-English)"
+        },
+        {
+          "name": "raw-7bit",
+          "params": {
+            "allow_bytes": "0x00-0x7F",
+            "encoding": "raw",
+            "fields": [
+              {
+                "length": 32,
+                "name": "FIELD",
+                "offset": 12
+              }
+            ],
+            "padding": "none"
+          },
+          "title": "Raw bytes: 7-bit values only (0x00-0x7F)"
+        }
+      ]
     }
+  },
+  "text": {
+    "encodings": [
+      "ascii",
+      "utf8",
+      "raw"
+    ],
+    "formula_start": "=+-@",
+    "profiles": {
+      "custom": {
+        "chars": "",
+        "description": "only the characters listed in also_allow",
+        "not_first": "",
+        "title": "Custom",
+        "unicode": false
+      },
+      "hex": {
+        "chars": "0-9A-Fa-f",
+        "description": "0-9 A-F a-f: serial numbers, hashes",
+        "not_first": "",
+        "title": "Hex",
+        "unicode": false
+      },
+      "identifier": {
+        "chars": "A-Za-z0-9_.-",
+        "description": "letters, digits, _ . - (not starting with - or .): mode names, component IDs",
+        "not_first": "-.",
+        "title": "Identifier",
+        "unicode": false
+      },
+      "numeric": {
+        "chars": "0-9.+eE-",
+        "description": "digits and . + - e E: numbers sent as text, entity IDs",
+        "not_first": "",
+        "title": "Number as text",
+        "unicode": false
+      },
+      "path": {
+        "chars": "A-Za-z0-9_./-",
+        "description": "letters, digits, _ . - / (not starting with -): file names",
+        "not_first": "-",
+        "title": "File path",
+        "unicode": false
+      },
+      "printable": {
+        "chars": " -~",
+        "description": "any printable character: text that is only ever displayed",
+        "not_first": "",
+        "title": "Printable",
+        "unicode": true
+      },
+      "safe_text": {
+        "chars": " -~",
+        "description": "printable without ; | & $ ` < > \\ ' \" { } %: text that may reach scripts, CSV or SQL",
+        "minus": ";|&$`<>\\'\"{}%",
+        "not_first": "",
+        "title": "Safe text",
+        "unicode": true
+      }
+    },
+    "shell_and_markup": ";|&$`<>\\'\"{}%"
   },
   "top_level_keys": [
     "default_action",

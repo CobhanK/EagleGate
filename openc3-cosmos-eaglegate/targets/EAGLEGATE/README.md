@@ -36,10 +36,57 @@ The rules file has a `version`, a `default_action` and an ordered `rules` list. 
 | `sequence` | the per-APID sequence count is not the next one (replay, repeat, reorder). The count wraps at 16384 and `max_gap` is configurable | DENY only |
 | `rate` | a packet arrives sooner than `min_interval` after the last allowed one, per APID | DENY only |
 | `authenticity` | the HMAC-SHA256 trailer is missing or wrong, with an optional SPI check. The key comes from an env var and never from the rules file | DENY only |
+| `text` | a text field holds a character, byte or substring its allowlist doesn't permit (see below) | DENY only |
 
 **Ordering matters:** check rules must sit above the ALLOW rules they protect. Otherwise the ALLOW decides first and the check never runs. In the shipped file, the active rules are "deny CMD-type packets on the telemetry link", then "allow APID 2 at exactly 11 bytes" and "allow APID 3 at exactly 10 bytes". The range, sequence, rate and authenticity rules are in the file as disabled examples.
 
 Stateful rules (`sequence` and `rate`) only update their memory (`record()`) when the packet is finally **allowed**. A forged packet that a later rule denies cannot poison their state.
+
+### Text rules (injection filtering for downlink text)
+
+Text the spacecraft sends ends up in CSV exports, terminals, logs, scripts and dashboards, where some characters *do* something: a leading `=` is a spreadsheet formula, ESC starts a terminal escape sequence, `$(` runs a shell command, a newline forges a log line. A `text` rule checks only the fields you list (the packet's `STRING` items from `tlm.txt`) against an **allowlist**. Scanning whole binary packets for "bad strings" doesn't work: binary data contains those bytes all the time.
+
+```json
+{"id": "text-cfdp-file-names", "type": "text", "action": "DENY", "match": {"apid": ["0x0B1"]},
+ "params": {"fields": [{"name": "ENG_SRCFILE", "offset": 80, "length": 64}],
+            "encoding": "ascii", "profile": "path", "deny_substrings": [".."]}}
+```
+
+**`encoding`** decides how the field's bytes are read:
+
+| Encoding | Use for | Always refused |
+|---|---|---|
+| `ascii` (default) | Text from flight software (cFS strings are plain ASCII) | Control characters, DEL, every byte ≥ `0x80` |
+| `utf8` | Text that legitimately contains non-English characters | The same for ASCII; invalid UTF-8 (overlong, truncated, surrogates); control, format and invisible characters (text-direction overrides, zero-width characters, `U+2028`); characters that normalise (NFKC) to an ASCII character the profile forbids, e.g. a full-width `；` |
+| `raw` | Binary fields: allow or deny **byte values written as numbers** (`allow_bytes: "0x00-0x7F"`, `deny_bytes: "0x1B, 27"`), and hex byte sequences in `deny_substrings` (`"1b5b"`) | Nothing by default; you choose |
+
+**`profile`** (ascii/utf8) is the starting allowlist:
+
+| Profile | Allows |
+|---|---|
+| `identifier` | `A-Z a-z 0-9 _ . -`, not starting with `-` or `.` |
+| `path` | `A-Z a-z 0-9 _ . - /`, not starting with `-` (add `".."` to `deny_substrings`) |
+| `hex` | `0-9 A-F a-f` |
+| `numeric` | `0-9 . + - e E` |
+| `printable` | any printable character (utf8: plus safe non-ASCII) |
+| `safe_text` (default) | `printable` without ``; \| & $ ` < > \ ' " { } %`` |
+| `custom` | only what `also_allow` lists |
+
+**Tuning:**
+- `also_allow` / `also_deny` add or remove characters, in character-class syntax: `"A-Z_ "`, with `-` literal at either end.
+- `deny_substrings` is literal and case-insensitive.
+- `padding`: `nul` allows trailing NULs and refuses anything after the first NUL. That catches data hidden behind the terminator, which COSMOS doesn't display. The other values are `space` and `none`.
+- `no_formula_start` refuses a first character of `= + - @`; on by default.
+- `min_length` / `max_length` count bytes after padding is removed.
+- Text can never be widened past the always-refused column above.
+
+**Reasons never repeat the field's content**, since that could be the attack itself, and reasons reach `FIREWALL_STATUS`, logs and exports. Example: `field ENG_SRCFILE (packet offset 80): byte 0x1B (ESC) at offset 5 is not allowed by profile path`. The bytes themselves are kept in quarantine as evidence.
+
+**In the tool page**, **Add rule** lists ready-made presets: identifier, file path, safe text, printable, hex, numeric, UTF-8 text and raw 7-bit. The text-rule form shows what the settings allow and has a **Try a sample** box that runs the same check as the firewall: `src/tools/eaglegate/textCheck.js`, kept identical to `lib/eaglegate_text.py` by the shared cases in `tests/fixtures/text_rule_cases.json`. Change both files together.
+
+**Examples:** the shipped rules file has disabled examples for NOS3's `CF_TRANSPACKET` (APID `0x0B1`): five 64-byte file names (`path`), the source entity ID (`numeric`), and a free-text status placeholder (`safe_text`). They only help where that telemetry passes through EagleGate.
+
+**Cost:** about 2–3 µs per packet for five 64-byte fields.
 
 ### What the rules file cannot change
 
@@ -139,6 +186,7 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
 | 14 | History of applied versions, plus version and sha256 in details, the page and `FIREWALL_STATUS` | Confusion about what is running; slow recovery |
 | 15 | COSMOS logs every upload-URL request with the username | No record of who changed the rules |
 | 16 | Read-only page for Enterprise non-admins; no `v-html` | Accidental edits; script injection through rule text |
+| 17 | `text` rule reasons describe bytes as hex and never repeat field content | Telemetry text injecting into `LAST_REASON`, logs or exports through the firewall itself |
 
 **Known limits:**
 - **COSMOS Core has no admin role:** anyone with the COSMOS password can change the rules.

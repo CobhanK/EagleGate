@@ -10,6 +10,7 @@ it found; that reason is what operators see for quarantined packets:
   sequence      the sequence count is not the next one      DENY only
   rate          the packet came too soon after the last     DENY only
   authenticity  the MAC trailer is missing or wrong         DENY only
+  text          a text field holds characters it should not DENY only
 
 To add a rule type: subclass Rule in eaglegate_rule_types.py, set
 TYPE, PARAM_KEYS and PARAM_SCHEMA, implement parse_params() and fires() (and record() if the
@@ -28,6 +29,7 @@ class Rule:
     PARAM_KEYS = frozenset()   # keys allowed in the rule's "params" object
     PARAM_SCHEMA = {}          # the same keys described for the rules editor page (rules_schema())
     PARAM_RULES = []           # cross-field checks parse_params() makes, in words
+    PRESETS = []               # named starting points for the editor's "Add rule" menu
 
     id: str
     action: str

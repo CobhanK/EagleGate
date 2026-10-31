@@ -151,21 +151,96 @@
           </div>
           <v-row dense>
             <v-col
-              v-for="(spec, key) in typeSpec.params"
+              v-for="(spec, key) in visibleParams"
               :key="key"
               cols="12"
-              md="6"
+              :md="spec.type === 'object_list' ? 12 : 6"
             >
               <v-select
                 v-if="spec.type === 'enum'"
-                :model-value="rule.params[key]"
-                :items="spec.values"
+                :model-value="rule.params[key] ?? spec.default"
+                :items="enumItems(spec)"
                 :label="labelFor(key, spec)"
                 :hint="spec.help"
                 persistent-hint
                 :readonly="readonly"
-                @update:model-value="rule.params[key] = $event"
+                @update:model-value="
+                  key === 'encoding'
+                    ? changeEncoding($event)
+                    : setParam(key, $event)
+                "
               />
+              <v-switch
+                v-else-if="spec.type === 'bool'"
+                :model-value="rule.params[key] ?? spec.default"
+                :label="key"
+                :hint="spec.help"
+                persistent-hint
+                color="primary"
+                :readonly="readonly"
+                @update:model-value="setParam(key, $event)"
+              />
+              <v-combobox
+                v-else-if="spec.type === 'string_list'"
+                :model-value="rule.params[key] || []"
+                :label="labelFor(key, spec)"
+                :hint="hintFor(spec)"
+                persistent-hint
+                multiple
+                chips
+                closable-chips
+                :readonly="readonly"
+                @update:model-value="setParam(key, $event)"
+              />
+              <v-text-field
+                v-else-if="spec.type === 'charset'"
+                :model-value="rule.params[key] ?? ''"
+                :label="labelFor(key, spec)"
+                :hint="hintFor(spec)"
+                persistent-hint
+                :readonly="readonly"
+                @update:model-value="setParam(key, $event)"
+              />
+              <div v-else-if="spec.type === 'object_list'">
+                <div class="text-subtitle-2">{{ labelFor(key, spec) }}</div>
+                <div class="text-caption">{{ spec.help }}</div>
+                <div
+                  v-for="(item, index) in rule.params[key] || []"
+                  :key="index"
+                  class="d-flex ga-2 align-center"
+                >
+                  <v-text-field
+                    v-for="(itemSpec, field) in spec.fields"
+                    :key="field"
+                    :model-value="fieldText(item, field, itemSpec)"
+                    :label="labelFor(field, itemSpec)"
+                    :hint="itemSpec.help"
+                    :readonly="readonly"
+                    density="compact"
+                    @update:model-value="
+                      setField(item, field, itemSpec, $event)
+                    "
+                  />
+                  <v-btn
+                    v-if="!readonly"
+                    icon="mdi-delete"
+                    variant="text"
+                    :aria-label="`Remove ${key} entry`"
+                    @click="removeListItem(key, index)"
+                  />
+                </div>
+                <v-btn
+                  v-if="
+                    !readonly &&
+                    (rule.params[key] || []).length < (spec.max_items ?? 99)
+                  "
+                  variant="text"
+                  prepend-icon="mdi-plus"
+                  @click="addListItem(key)"
+                >
+                  Add field
+                </v-btn>
+              </div>
               <v-text-field
                 v-else
                 :model-value="fieldText(rule.params, key, spec)"
@@ -177,6 +252,56 @@
               />
             </v-col>
           </v-row>
+        </template>
+
+        <!-- Text rules: what the settings let through, and a sample to try -->
+        <template v-if="type === 'text'">
+          <div class="text-subtitle-1 mt-4">What these settings allow</div>
+          <div v-if="compiledText.error" class="text-caption text-error">
+            {{ compiledText.error }}
+          </div>
+          <code v-else class="allowed">{{ allowedPreview }}</code>
+          <div class="text-caption mt-1">
+            Control characters, DEL and (for ascii) bytes above 0x7E are never
+            allowed in text; use encoding raw for binary fields.
+          </div>
+          <v-text-field
+            v-model="sample"
+            class="mt-2"
+            :label="
+              encoding === 'raw'
+                ? 'Try a sample (hex bytes)'
+                : 'Try a sample value'
+            "
+            :hint="
+              encoding === 'raw'
+                ? 'e.g. 41 42 1b 5b'
+                : 'Checked exactly as the firewall checks one field'
+            "
+            persistent-hint
+            clearable
+          />
+          <v-alert
+            v-if="sampleResult"
+            :type="
+              sampleResult.allowed
+                ? 'success'
+                : sampleResult.denied
+                  ? 'error'
+                  : 'info'
+            "
+            variant="tonal"
+            density="compact"
+            class="mt-2"
+          >
+            {{
+              sampleResult.allowed
+                ? 'Allowed'
+                : sampleResult.denied
+                  ? `Denied: ${sampleResult.denied}`
+                  : sampleResult.error
+            }}
+          </v-alert>
         </template>
 
         <v-alert v-if="errors.length" type="error" variant="tonal" class="mt-4">
@@ -203,7 +328,20 @@
 </template>
 
 <script>
-import { clone, fromInput, newRule, validate } from './rulesModel.js'
+import {
+  appliesTo,
+  clone,
+  dropInapplicable,
+  fromInput,
+  newRule,
+  validate,
+} from './rulesModel.js'
+import {
+  checkField,
+  compileText,
+  describeAllowed,
+  sampleBytes,
+} from './textCheck.js'
 
 export default {
   props: {
@@ -216,7 +354,7 @@ export default {
   },
   emits: ['update:modelValue', 'save'],
   data() {
-    return { rule: null }
+    return { rule: null, sample: '' }
   },
   computed: {
     type() {
@@ -233,6 +371,35 @@ export default {
     },
     matchSpec() {
       return this.schema.match.keys
+    },
+    encoding() {
+      return this.rule.params.encoding || 'ascii'
+    },
+    // Settings that apply to the chosen encoding (text rules); all for others
+    visibleParams() {
+      return Object.fromEntries(
+        Object.entries(this.typeSpec.params).filter(([, spec]) =>
+          appliesTo(spec, this.encoding),
+        ),
+      )
+    },
+    compiledText() {
+      try {
+        return { ok: compileText(this.rule.params, this.schema) }
+      } catch (error) {
+        return { error: error.message }
+      }
+    },
+    allowedPreview() {
+      return this.compiledText.ok ? describeAllowed(this.compiledText.ok) : ''
+    },
+    sampleResult() {
+      if (!this.sample || !this.compiledText.ok) return null
+      const bytes = sampleBytes(this.sample, this.encoding)
+      if (!bytes)
+        return { error: 'Enter the sample as hex bytes, e.g. 1b 5b 32' }
+      const reason = checkField(this.compiledText.ok, bytes)
+      return reason ? { denied: reason } : { allowed: true }
     },
     simpleMatchKeys() {
       // Every match condition except "bytes", which has its own list editor
@@ -260,6 +427,7 @@ export default {
           copy.match = copy.match || {}
           copy.params = copy.params || {}
           this.rule = copy
+          this.sample = ''
         }
       },
     },
@@ -272,6 +440,7 @@ export default {
       const parts = []
       if (spec.help) parts.push(spec.help)
       if (spec.type === 'int_list') parts.push('comma separated, e.g. 2, 0x003')
+      if (spec.type === 'string_list') parts.push('press Enter after each')
       if (spec.min !== undefined && spec.max !== undefined)
         parts.push(`${spec.min}..${spec.max}`)
       if (spec.default !== undefined) parts.push(`default ${spec.default}`)
@@ -319,6 +488,39 @@ export default {
       if (value === null) delete obj[key]
       else obj[key] = value
     },
+    enumItems(spec) {
+      return spec.values.map((value) => ({
+        title: spec.value_help?.[value]
+          ? `${value}: ${spec.value_help[value]}`
+          : String(value),
+        value,
+      }))
+    },
+    // Store a setting; empty values are removed rather than written as ""
+    setParam(key, value) {
+      const empty =
+        value === null ||
+        value === undefined ||
+        value === '' ||
+        (Array.isArray(value) && value.length === 0)
+      if (empty) delete this.rule.params[key]
+      else this.rule.params[key] = value
+    },
+    changeEncoding(encoding) {
+      this.rule.params.encoding = encoding
+      dropInapplicable(this.rule.params, this.typeSpec.params, true)
+      this.sample = ''
+    },
+    addListItem(key) {
+      const items = this.rule.params[key] || []
+      this.rule.params[key] = [
+        ...items,
+        { name: `FIELD${items.length + 1}`, offset: 12, length: 32 },
+      ]
+    },
+    removeListItem(key, index) {
+      this.rule.params[key].splice(index, 1)
+    },
     setEnabled(on) {
       if (on) delete this.rule.enabled
       else this.rule.enabled = false
@@ -357,3 +559,10 @@ export default {
   },
 }
 </script>
+
+<style scoped>
+.allowed {
+  white-space: pre-wrap;
+  word-break: break-all;
+}
+</style>

@@ -5,29 +5,10 @@
 // them in the page. The schema comes from public/eaglegate_rules_schema.json,
 // which the build generates from that parser, so the two cannot drift.
 
-// Integers in the rules file may be JSON numbers or strings like "0x1FF".
-// Mirrors eaglegate_validate.to_int, i.e. Python's int(text, 0): hex, octal
-// (0o), binary and plain decimal, but no leading zeros ("010" is refused).
-const INT_LITERAL = {
-  16: /^([+-]?)0x([0-9a-f](?:_?[0-9a-f])*)$/i,
-  8: /^([+-]?)0o([0-7](?:_?[0-7])*)$/i,
-  2: /^([+-]?)0b([01](?:_?[01])*)$/i,
-  10: /^([+-]?)([1-9](?:_?\d)*|0+)$/,
-}
+import { toInt } from './ints.js'
+import { compileText, floorProblem, parseByteSet } from './textCheck.js'
 
-export function toInt(value) {
-  if (typeof value === 'number') return Number.isInteger(value) ? value : NaN
-  if (typeof value !== 'string') return NaN // booleans are refused too
-  const text = value.trim()
-  for (const [base, pattern] of Object.entries(INT_LITERAL)) {
-    const found = pattern.exec(text)
-    if (found) {
-      const n = parseInt(found[2].replaceAll('_', ''), Number(base))
-      return found[1] === '-' ? -n : n
-    }
-  }
-  return NaN
-}
+export { toInt }
 
 // Mirrors eaglegate_validate.to_number: JSON numbers only, never strings
 export function toNumber(value) {
@@ -102,6 +83,36 @@ function checkValue(spec, value, where, errors) {
       if (toInt(value[0]) > toInt(value[1])) errors.push(`${where} low > high`)
       return
     }
+    case 'string_list':
+      if (!Array.isArray(value))
+        return errors.push(`${where} must be a list of strings`)
+      if (spec.max_items !== undefined && value.length > spec.max_items)
+        errors.push(`${where} must have at most ${spec.max_items} entries`)
+      value.forEach((v, i) => {
+        if (typeof v !== 'string' || v === '')
+          errors.push(`${where}[${i}] must be a non-empty string`)
+      })
+      return
+    case 'charset':
+      if (typeof value !== 'string') errors.push(`${where} must be a string`)
+      return // expanded with the encoding in checkParamRules
+    case 'byte_set':
+      try {
+        parseByteSet(value, where)
+      } catch (error) {
+        errors.push(error.message)
+      }
+      return
+    case 'object_list':
+      if (!Array.isArray(value)) return errors.push(`${where} must be a list`)
+      if (value.length < (spec.min_items ?? 0))
+        errors.push(`${where} needs at least ${spec.min_items} entries`)
+      if (spec.max_items !== undefined && value.length > spec.max_items)
+        errors.push(`${where} must have at most ${spec.max_items} entries`)
+      value.forEach((item, i) =>
+        checkObject(spec.fields, item, `${where}[${i}]`, errors),
+      )
+      return
     case 'byte_checks':
       if (!Array.isArray(value) || value.length === 0)
         return errors.push(`${where} must be a non-empty list`)
@@ -191,7 +202,7 @@ export function validate(doc, schema) {
     }
     if (enabled(rule)) {
       checkObject(type.params, params, `${where}.params`, errors)
-      checkParamRules(ruleType(rule), params, `${where}.params`, errors)
+      checkParamRules(ruleType(rule), params, `${where}.params`, errors, schema)
     }
   })
   return errors
@@ -208,7 +219,67 @@ function checkMatch(match, where, schema, errors) {
     errors.push(`${where} min_length > max_length`)
 }
 
-function checkParamRules(type, params, where, errors) {
+const MAX_PACKET = 65542
+const FIELD_NAME = /^[A-Za-z0-9_]{1,64}$/
+
+// Settings marked for some encodings only ("encodings" in the schema)
+export function appliesTo(spec, encoding) {
+  return !spec.encodings || spec.encodings.includes(encoding || 'ascii')
+}
+
+function checkTextParams(params, where, errors, schema) {
+  const encoding = params.encoding || 'ascii'
+  const specs = schema.rule_types.text.params
+  for (const [key, spec] of Object.entries(specs)) {
+    if (params[key] !== undefined && !appliesTo(spec, encoding))
+      errors.push(
+        `${where}.${key} does not apply to encoding ${encoding} (only ${spec.encodings.join(', ')})`,
+      )
+  }
+  ;(Array.isArray(params.fields) ? params.fields : []).forEach((field, i) => {
+    const at = `${where}.fields[${i}]`
+    if (field.name !== undefined && !FIELD_NAME.test(field.name))
+      errors.push(`${at}.name may only use letters, digits and _ (up to 64)`)
+    if (toInt(field.offset) + toInt(field.length) > MAX_PACKET)
+      errors.push(`${at} ends past the largest CCSDS packet`)
+  })
+  if (encoding !== 'raw' && params.profile === 'custom' && !params.also_allow)
+    errors.push(`${where}: profile custom needs also_allow`)
+  if (
+    params.min_length !== undefined &&
+    params.max_length !== undefined &&
+    toInt(params.min_length) > toInt(params.max_length)
+  )
+    errors.push(`${where} min_length > max_length`)
+  ;(params.deny_substrings || []).forEach((text, i) => {
+    const at = `${where}.deny_substrings[${i}]`
+    if (typeof text !== 'string') return
+    if (encoding === 'raw') {
+      if (!/^\s*([0-9a-f]{2}\s*)+$/i.test(text))
+        errors.push(`${at} must be hex for encoding raw, like 1b5b`)
+      return
+    }
+    for (const ch of text) {
+      const cp = ch.codePointAt(0)
+      if (encoding === 'ascii' && !(cp >= 0x20 && cp <= 0x7e))
+        errors.push(
+          `${at}: U+${cp.toString(16).toUpperCase().padStart(4, '0')} is not printable ASCII`,
+        )
+      else if (floorProblem(cp))
+        errors.push(
+          `${at}: U+${cp.toString(16).toUpperCase().padStart(4, '0')} is a ${floorProblem(cp)}`,
+        )
+    }
+  })
+  try {
+    compileText({ ...params, where }, schema) // expands the character and byte sets
+  } catch (error) {
+    errors.push(error.message)
+  }
+}
+
+function checkParamRules(type, params, where, errors, schema) {
+  if (type === 'text') checkTextParams(params, where, errors, schema)
   if (type === 'range') {
     const hasMin = params.min !== undefined && params.min !== ''
     const hasMax = params.max !== undefined && params.max !== ''
@@ -281,6 +352,21 @@ export function warnings(doc, schema, running) {
   })
 
   active
+    .filter(
+      (r) =>
+        ruleType(r) === 'text' &&
+        r.params?.encoding === 'raw' &&
+        !r.params.allow_bytes &&
+        !r.params.deny_bytes &&
+        !(r.params.deny_substrings || []).length,
+    )
+    .forEach((r) =>
+      result.push(
+        `'${r.id}' (raw) allows every byte value: it only checks padding and length`,
+      ),
+    )
+
+  active
     .filter((r) => ruleType(r) === 'authenticity')
     .forEach((r) =>
       result.push(
@@ -307,11 +393,29 @@ export function clone(value) {
   return JSON.parse(JSON.stringify(value))
 }
 
-export function newRule(type, schema, existingIds) {
+// Remove settings that do not apply to params.encoding, and fill in the
+// defaults of those that now do (used when a rule is created or the encoding
+// changes). Returns params.
+export function dropInapplicable(params, specs, addDefaults = false) {
+  for (const [key, spec] of Object.entries(specs)) {
+    if (!appliesTo(spec, params.encoding)) delete params[key]
+    else if (
+      addDefaults &&
+      params[key] === undefined &&
+      spec.default !== undefined
+    )
+      params[key] = spec.default
+  }
+  return params
+}
+
+// A new rule of this type, from a preset's settings when one is given
+export function newRule(type, schema, existingIds, preset = null) {
+  const base = preset ? preset.name : `new-${type}-rule`
   let n = 1
-  while (existingIds.includes(`new-${type}-rule-${n}`)) n += 1
+  while (existingIds.includes(`${base}-${n}`)) n += 1
   const rule = {
-    id: `new-${type}-rule-${n}`,
+    id: `${base}-${n}`,
     description: '',
     action: schema.rule_types[type].actions[0],
     match: {},
@@ -321,6 +425,8 @@ export function newRule(type, schema, existingIds) {
   for (const [key, spec] of Object.entries(schema.rule_types[type].params)) {
     if (spec.default !== undefined) params[key] = spec.default
   }
+  if (preset) Object.assign(params, clone(preset.params))
+  dropInapplicable(params, schema.rule_types[type].params)
   if (Object.keys(schema.rule_types[type].params).length) rule.params = params
   return rule
 }

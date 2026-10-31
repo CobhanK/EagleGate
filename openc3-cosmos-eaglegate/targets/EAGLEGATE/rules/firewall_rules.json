@@ -1,6 +1,6 @@
 {
   "version": 1,
-  "description": "EAGLEGATE telemetry firewall. Rules are checked top to bottom; the first rule that fires decides. Check rules (authenticity, sequence, rate, range) go above the ALLOW rules they protect. Bump 'version' on every change.",
+  "description": "EAGLEGATE telemetry firewall. Rules are checked top to bottom; the first rule that fires decides. Check rules (authenticity, sequence, rate, range, text) go above the ALLOW rules they protect. Bump 'version' on every change.",
   "default_action": "DENY",
   "rules": [
     {
@@ -76,6 +76,105 @@
         "data_type": "FLOAT32",
         "min": -100,
         "max": 100
+      }
+    },
+    {
+      "id": "example-text-cfdp-file-names",
+      "description": "EXAMPLE (disabled): NOS3 CF_TRANSPACKET file names (STRING items in CF_tlm.txt) may only be plain paths, no '..'. Only useful where CFDP telemetry passes through this firewall",
+      "type": "text",
+      "action": "DENY",
+      "enabled": false,
+      "match": {
+        "apid": [
+          "0x0B1"
+        ]
+      },
+      "params": {
+        "fields": [
+          {
+            "name": "ENG_SRCFILE",
+            "offset": 80,
+            "length": 64
+          },
+          {
+            "name": "ENG_DSTFILE",
+            "offset": 144,
+            "length": 64
+          },
+          {
+            "name": "ENG_TMPFILE",
+            "offset": 208,
+            "length": 64
+          },
+          {
+            "name": "APP_SRCFILE",
+            "offset": 320,
+            "length": 64
+          },
+          {
+            "name": "APP_DSTFILE",
+            "offset": 384,
+            "length": 64
+          }
+        ],
+        "encoding": "ascii",
+        "profile": "path",
+        "deny_substrings": [
+          ".."
+        ],
+        "padding": "nul",
+        "no_formula_start": true
+      }
+    },
+    {
+      "id": "example-text-cfdp-entity-id",
+      "description": "EXAMPLE (disabled): NOS3 CF_TRANSPACKET APP_SRCENTITYID is a number like 0.24",
+      "type": "text",
+      "action": "DENY",
+      "enabled": false,
+      "match": {
+        "apid": [
+          "0x0B1"
+        ]
+      },
+      "params": {
+        "fields": [
+          {
+            "name": "APP_SRCENTITYID",
+            "offset": 304,
+            "length": 16
+          }
+        ],
+        "encoding": "ascii",
+        "profile": "numeric",
+        "padding": "nul",
+        "min_length": 1
+      }
+    },
+    {
+      "id": "example-text-status-message",
+      "description": "EXAMPLE (disabled): a free-text status message (replace APID, offset and length with a real STRING item) that may reach scripts or CSV exports",
+      "type": "text",
+      "action": "DENY",
+      "enabled": false,
+      "match": {
+        "apid": [
+          5
+        ]
+      },
+      "params": {
+        "fields": [
+          {
+            "name": "STATUS_MSG",
+            "offset": 12,
+            "length": 64
+          }
+        ],
+        "encoding": "ascii",
+        "profile": "safe_text",
+        "padding": "nul",
+        "no_formula_start": true,
+        "max_length": 63
       }
     },
     {

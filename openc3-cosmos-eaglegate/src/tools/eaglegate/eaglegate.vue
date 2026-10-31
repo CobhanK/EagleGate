@@ -188,11 +188,12 @@
           </template>
           <v-list>
             <v-list-item
-              v-for="(spec, name) in schema.rule_types"
-              :key="name"
-              :title="name"
-              :subtitle="spec.description"
-              @click="addRule(name)"
+              v-for="item in addMenu"
+              :key="item.key"
+              :title="item.title"
+              :subtitle="item.subtitle"
+              :class="{ 'ml-4': item.preset }"
+              @click="addRule(item.type, item.preset)"
             />
           </v-list>
         </v-menu>
@@ -200,8 +201,8 @@
       <v-card-text>
         <div class="text-caption mb-2">
           Checked top to bottom; the first rule that fires decides. Check rules
-          (range, sequence, rate, authenticity) go above the ALLOW rules they
-          protect.
+          (range, sequence, rate, authenticity, text) go above the ALLOW rules
+          they protect.
         </div>
         <v-row dense>
           <v-col cols="12" md="3">
@@ -510,6 +511,21 @@ export default {
     readonly() {
       return this.isEnterprise && !this.isAdmin
     },
+    // Each rule type, followed by its presets (ready-made starting points)
+    addMenu() {
+      const items = []
+      for (const [type, spec] of Object.entries(this.schema.rule_types)) {
+        items.push({ key: type, type, title: type, subtitle: spec.description })
+        for (const preset of spec.presets || [])
+          items.push({
+            key: `${type}/${preset.name}`,
+            type,
+            preset,
+            title: preset.title,
+          })
+      }
+      return items
+    },
     menus() {
       return [
         {
@@ -698,11 +714,11 @@ export default {
     otherIds(exceptIndex) {
       return this.doc.rules.filter((_, i) => i !== exceptIndex).map((r) => r.id)
     },
-    addRule(type) {
+    addRule(type, preset = null) {
       const ids = this.doc.rules.map((r) => r.id)
       this.editor = {
         open: true,
-        rule: newRule(type, this.schema, ids),
+        rule: newRule(type, this.schema, ids, preset),
         index: -1,
         isNew: true,
         otherIds: ids,

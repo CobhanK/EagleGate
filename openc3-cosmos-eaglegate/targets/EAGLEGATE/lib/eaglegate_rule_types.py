@@ -1,4 +1,4 @@
-"""The check rule types: range, sequence, rate and authenticity.
+"""The check rule types: range, sequence, rate, authenticity and text.
 
 Each one can only DENY, and each documents its tunable "params" in its
 docstring. The plain "match" rule and the Rule base class are in eaglegate_rule.py.
@@ -7,13 +7,16 @@ import hashlib
 import hmac
 import math
 import os
+import re
 import struct
 from dataclasses import dataclass, field
 
 from eaglegate_ccsds_header import CCSDS_HEADER_BYTES, MAX_PACKET, SEQ_COUNT_MODULO
 from eaglegate_rule import Rule
 from eaglegate_rules_error import RulesError
-from eaglegate_validate import require, to_int, to_number
+from eaglegate_text import (ENCODINGS, FORMULA_START, MAX_SUBSTRING, MAX_SUBSTRINGS, PADDINGS, TEXT_PROFILES,
+                            TextCheck, floor_problem)
+from eaglegate_validate import no_unknown_keys, require, to_int, to_number
 
 
 # ---- range -------------------------------------------------------------------
@@ -269,3 +272,190 @@ class AuthenticityRule(Rule):
         if hmac.compare_digest(mac, expected):  # constant time, no timing leak
             return None
         return f"MAC mismatch, received {mac.hex()}"
+
+
+# ---- text --------------------------------------------------------------------
+
+MAX_TEXT_FIELDS = 32
+FIELD_NAME = re.compile(r"[A-Za-z0-9_]{1,64}")
+TEXT_ONLY = ("ascii", "utf8")
+
+
+def _field_checks():
+    return {
+        "name": {"type": "string", "help": "shown in reasons, e.g. the item name in tlm.txt (letters, digits, _)"},
+        "offset": {"type": "int", "min": 0, "max": MAX_PACKET - 1, "required": True,
+                   "help": "byte offset of the field in the whole packet"},
+        "length": {"type": "int", "min": 1, "max": MAX_PACKET, "required": True,
+                   "help": "field size in bytes (the STRING item's bit size / 8)"},
+    }
+
+
+@dataclass(kw_only=True)
+class TextRule(Rule):
+    """Deny packets whose text fields contain characters they should not.
+
+      "type": "text",
+      "params": {
+        "fields": [{"name": "ENG_SRCFILE", "offset": 80, "length": 64}],  # required
+        "encoding": "ascii",       # ascii (default), utf8, or raw (binary: byte values)
+        "profile": "safe_text",    # ascii/utf8: identifier, path, hex, numeric,
+                                   #   printable, safe_text (default) or custom
+        "also_allow": "",          # ascii/utf8: characters to add, e.g. "A-Z_ "
+        "also_deny": "%;",         # ascii/utf8: characters to remove
+        "allow_bytes": "0x20-0x7E", # raw: allowed byte values (empty: all)
+        "deny_bytes": "0x1B",      # raw: byte values to refuse
+        "deny_substrings": [".."], # text: literal, case-insensitive; raw: hex "1b5b"
+        "padding": "nul",          # nul (default): trailing NULs, nothing after the
+                                   #   first; space: trailing spaces; none
+        "no_formula_start": true,  # ascii/utf8: refuse a first character of = + - @
+        "min_length": 1, "max_length": 63   # bytes, after padding is removed
+      }
+
+    Control characters, DEL and (in ascii) every byte >= 0x80 can never be
+    allowed in text; use encoding raw for binary fields. Profiles and syntax
+    are in eaglegate_text.py. A packet too short for a field is denied.
+    """
+
+    TYPE = "text"
+    PARAM_KEYS = frozenset({"fields", "encoding", "profile", "also_allow", "also_deny", "allow_bytes",
+                            "deny_bytes", "deny_substrings", "padding", "no_formula_start",
+                            "min_length", "max_length"})
+    PARAM_SCHEMA = {
+        "fields": {"type": "object_list", "required": True, "min_items": 1, "max_items": MAX_TEXT_FIELDS,
+                   "fields": _field_checks(), "help": "the text fields to check, from the packet's STRING items"},
+        "encoding": {"type": "enum", "values": list(ENCODINGS), "default": "ascii",
+                     "value_help": {"ascii": "printable ASCII only (most flight software)",
+                                    "utf8": "ASCII rules plus safe non-ASCII characters",
+                                    "raw": "binary data: allow or deny byte values"}},
+        "profile": {"type": "enum", "values": list(TEXT_PROFILES), "default": "safe_text", "encodings": list(TEXT_ONLY),
+                    "value_help": {name: p["description"] for name, p in TEXT_PROFILES.items()}},
+        "also_allow": {"type": "charset", "encodings": list(TEXT_ONLY),
+                       "help": 'characters to add to the profile, e.g. "A-Z_ " (- is literal at the start or end)'},
+        "also_deny": {"type": "charset", "encodings": list(TEXT_ONLY),
+                      "help": "characters to remove from the profile"},
+        "allow_bytes": {"type": "byte_set", "encodings": ["raw"],
+                        "help": "allowed byte values, e.g. 0x20-0x7E, 0x0A (empty: every byte)"},
+        "deny_bytes": {"type": "byte_set", "encodings": ["raw"], "help": "byte values to refuse, e.g. 0x1B, 0x7F"},
+        "deny_substrings": {"type": "string_list", "max_items": MAX_SUBSTRINGS,
+                            "help": "text: literal, case-insensitive; raw: hex like 1b5b"},
+        "padding": {"type": "enum", "values": list(PADDINGS), "default": "nul",
+                    "value_help": {"nul": "trailing NULs; nothing may follow the first NUL",
+                                   "space": "trailing spaces", "none": "the whole field is text"}},
+        "no_formula_start": {"type": "bool", "default": True, "encodings": list(TEXT_ONLY),
+                             "help": f"refuse a first character of {' '.join(FORMULA_START)} (CSV formula injection)"},
+        "min_length": {"type": "int", "min": 0, "max": MAX_PACKET, "help": "bytes, after padding is removed"},
+        "max_length": {"type": "int", "min": 0, "max": MAX_PACKET, "help": "bytes, after padding is removed"},
+    }
+    PARAM_RULES = ["min_length <= max_length", "profile custom needs also_allow",
+                   "settings marked ascii/utf8 or raw apply only to that encoding"]
+    # Starting points for the rules editor's "Add rule" menu
+    PRESETS = [
+        {"name": name, "title": f"Text: {TEXT_PROFILES[profile]['title'].lower()}{suffix}",
+         "params": {"fields": [{"name": "FIELD", "offset": 12, "length": 32}], "encoding": "ascii",
+                    "profile": profile, "padding": "nul", "no_formula_start": True, **extra}}
+        for name, profile, suffix, extra in [
+            ("text-identifier", "identifier", " (names, modes, IDs)", {"min_length": 1}),
+            ("text-path", "path", " (no ..)", {"deny_substrings": [".."], "min_length": 1}),
+            ("text-safe", "safe_text", " (scripts, CSV, SQL)", {}),
+            ("text-printable", "printable", " (display only)", {}),
+            ("text-hex", "hex", "", {"min_length": 1}),
+            ("text-numeric", "numeric", "", {"min_length": 1}),
+        ]
+    ] + [
+        {"name": "text-utf8", "title": "Text: UTF-8 safe text (non-English)",
+         "params": {"fields": [{"name": "FIELD", "offset": 12, "length": 32}], "encoding": "utf8",
+                    "profile": "safe_text", "padding": "nul", "no_formula_start": True}},
+        {"name": "raw-7bit", "title": "Raw bytes: 7-bit values only (0x00-0x7F)",
+         "params": {"fields": [{"name": "FIELD", "offset": 12, "length": 32}], "encoding": "raw",
+                    "allow_bytes": "0x00-0x7F", "padding": "none"}},
+    ]
+
+    text_fields: list   # [(label, offset, length)]
+    check: TextCheck
+
+    @classmethod
+    def parse_params(cls, params, where):
+        encoding = params.get("encoding", "ascii")
+        require(encoding in ENCODINGS, f"{where}.encoding must be one of {list(ENCODINGS)}, got {encoding!r}")
+        for key, spec in cls.PARAM_SCHEMA.items():
+            if key in params and "encodings" in spec and encoding not in spec["encodings"]:
+                raise RulesError(f"{where}.{key} does not apply to encoding {encoding} "
+                                 f"(only {', '.join(spec['encodings'])})")
+        fields = _parse_fields(params.get("fields"), f"{where}.fields")
+        settings = {"encoding": encoding, "where": where}
+
+        padding = params.get("padding", "nul")
+        require(padding in PADDINGS, f"{where}.padding must be one of {list(PADDINGS)}, got {padding!r}")
+        settings["padding"] = padding
+        for key in ("min_length", "max_length"):
+            if key in params:
+                settings[key] = to_int(params[key], f"{where}.{key}", 0, MAX_PACKET)
+        if "min_length" in settings and "max_length" in settings:
+            require(settings["min_length"] <= settings["max_length"], f"{where} min_length > max_length")
+
+        substrings = params.get("deny_substrings", [])
+        require(isinstance(substrings, list) and len(substrings) <= MAX_SUBSTRINGS,
+                f"{where}.deny_substrings must be a list of at most {MAX_SUBSTRINGS} strings")
+        for index, text in enumerate(substrings):
+            _check_substring(text, encoding, f"{where}.deny_substrings[{index}]")
+        settings["deny_substrings"] = list(substrings)
+
+        if encoding == "raw":
+            for key in ("allow_bytes", "deny_bytes"):
+                settings[key] = params.get(key, "")
+        else:
+            profile = params.get("profile", "safe_text")
+            require(profile in TEXT_PROFILES, f"{where}.profile must be one of {list(TEXT_PROFILES)}, got {profile!r}")
+            if profile == "custom":
+                require(params.get("also_allow"), f"{where}: profile custom needs also_allow")
+            no_formula = params.get("no_formula_start", True)
+            require(isinstance(no_formula, bool), f"{where}.no_formula_start must be true or false")
+            settings.update(profile=profile, also_allow=params.get("also_allow", ""),
+                            also_deny=params.get("also_deny", ""), no_formula_start=no_formula)
+        return {"text_fields": fields, "check": TextCheck(**settings)}  # TextCheck validates the sets
+
+    def fires(self, header, packet, now):
+        for label, offset, length in self.text_fields:
+            if offset + length > len(packet):
+                return f"field {label}: packet is {len(packet)} bytes, too short for {length} bytes at offset {offset}"
+            detail = self.check.check(packet[offset:offset + length])
+            if detail:
+                return f"field {label} (packet offset {offset}): {detail}"
+        return None
+
+
+def _parse_fields(raw, where):
+    require(isinstance(raw, list) and 1 <= len(raw) <= MAX_TEXT_FIELDS,
+            f"{where} must be a list of 1 to {MAX_TEXT_FIELDS} fields")
+    fields = []
+    for index, field_spec in enumerate(raw):
+        at = f"{where}[{index}]"
+        require(isinstance(field_spec, dict), f"{at} must be an object")
+        no_unknown_keys(field_spec, {"name", "offset", "length"}, at)
+        require("offset" in field_spec and "length" in field_spec, f"{at} needs 'offset' and 'length'")
+        offset = to_int(field_spec["offset"], f"{at}.offset", 0, MAX_PACKET - 1)
+        length = to_int(field_spec["length"], f"{at}.length", 1, MAX_PACKET)
+        require(offset + length <= MAX_PACKET, f"{at} ends past the largest CCSDS packet")
+        name = field_spec.get("name", f"#{index + 1}")
+        require(isinstance(name, str) and (FIELD_NAME.fullmatch(name) or name == f"#{index + 1}"),
+                f"{at}.name may only use letters, digits and _ (up to 64)")
+        fields.append((name, offset, length))
+    return fields
+
+
+def _check_substring(text, encoding, where):
+    require(isinstance(text, str) and 0 < len(text) <= MAX_SUBSTRING,
+            f"{where} must be a non-empty string of at most {MAX_SUBSTRING} characters")
+    if encoding == "raw":
+        try:
+            require(len(bytes.fromhex(text)) > 0, f"{where} must hold at least one byte")
+        except ValueError:
+            raise RulesError(f"{where} must be hex for encoding raw, like 1b5b") from None
+        return
+    for ch in text:
+        cp = ord(ch)
+        if encoding == "ascii" and not 0x20 <= cp <= 0x7E:
+            raise RulesError(f"{where}: U+{cp:04X} is not printable ASCII")
+        if floor_problem(cp):
+            raise RulesError(f"{where}: U+{cp:04X} is a {floor_problem(cp)}")
