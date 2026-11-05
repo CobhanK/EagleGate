@@ -15,10 +15,38 @@ task :build => [:require_version] do
     puts "Warning: Building gem on Windows will lose file permissions"
   end
 
-  # Run pnpm build if we have a package.json
+  # Describe the rules file format for the tool page, from the Python parser
+  # itself, so the page's forms never drift from what the firewall accepts.
+  # The committed copy is used if Python is unavailable (a test keeps it current).
+  schema_cmd = 'python3 targets/EAGLEGATE/lib/eaglegate_rules_parser.py > public/eaglegate_rules_schema.json.tmp'
+  if system(schema_cmd)
+    FileUtils.mv('public/eaglegate_rules_schema.json.tmp', 'public/eaglegate_rules_schema.json')
+  else
+    FileUtils.rm_f('public/eaglegate_rules_schema.json.tmp')
+    puts "Warning: could not regenerate public/eaglegate_rules_schema.json; using the committed copy"
+  end
+
+  # Build the tool page (src/ -> tools/eaglegate/) if we have a package.json.
+  # `openc3.sh cli rake build` runs in a container without Node or pnpm; then
+  # package a tool page that was already built (pnpm build, or the openc3-node
+  # container), or explain how to build one.
   if File.exist?('package.json')
-    sh('pnpm run build') do |ok, status|
-      raise "pnpm run build failed" if !ok
+    if system('pnpm --version > /dev/null 2>&1')
+      sh('pnpm run build') do |ok, status|
+        raise "pnpm run build failed" if !ok
+      end
+    elsif File.exist?('tools/eaglegate/main.js')
+      puts "Warning: pnpm not found; packaging the tool page already built in tools/eaglegate/"
+      puts "         (run `pnpm build` first if you changed anything under src/)"
+      # The schema may have just been regenerated; keep the packaged page in step
+      FileUtils.cp('public/eaglegate_rules_schema.json', 'tools/eaglegate/eaglegate_rules_schema.json')
+    else
+      raise <<~MSG
+        pnpm not found and the tool page has not been built (no tools/eaglegate/main.js).
+        `openc3.sh cli rake build` runs without Node, so build the page first, either:
+          - locally:  pnpm install --frozen-lockfile --ignore-scripts && pnpm build
+          - or in the openc3-node container (see README.md), which can also run the whole rake build
+      MSG
     end
   end
 

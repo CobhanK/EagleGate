@@ -9,6 +9,8 @@ export default [
     languageOptions: {
       globals: {
         ...globals.node,
+        ...globals.browser,
+        OpenC3Auth: "readonly", // provided by the COSMOS tool base
       },
 
       parser: parser,

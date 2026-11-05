@@ -36,14 +36,15 @@ for the same packets, or the ALLOW decides first and the check never runs.
 import hashlib
 import json
 
-from eaglegate_match import Match
+from eaglegate_match import MATCH_RULES, MATCH_SCHEMA, Match
 from eaglegate_rule import MatchRule
-from eaglegate_rule_types import AuthenticityRule, RangeRule, RateRule, SequenceRule
+from eaglegate_rule_types import AuthenticityRule, RangeRule, RateRule, SequenceRule, TextRule
+from eaglegate_text import ENCODINGS, FORMULA_START, SHELL_AND_MARKUP, TEXT_PROFILES
 from eaglegate_rules_error import RulesError
 from eaglegate_ruleset import Ruleset
 from eaglegate_validate import no_unknown_keys, require
 
-RULE_TYPES = {cls.TYPE: cls for cls in (MatchRule, RangeRule, SequenceRule, RateRule, AuthenticityRule)}
+RULE_TYPES = {cls.TYPE: cls for cls in (MatchRule, RangeRule, SequenceRule, RateRule, AuthenticityRule, TextRule)}
 ACTIONS = ("ALLOW", "DENY")
 TOP_LEVEL_KEYS = {"version", "description", "default_action", "rules"}
 RULE_KEYS = {"id", "type", "action", "enabled", "description", "match", "params"}
@@ -117,3 +118,38 @@ def _parse_rule(raw, where):
 def _action(value, allowed, where):
     require(value in allowed, f"{where} must be one of {list(allowed)}, got {value!r}")
     return value
+
+
+def rules_schema():
+    """What a valid rules file may contain, as plain data for the rules editor page.
+    Built from the same constants parse_rules() checks against; parse_rules()
+    stays the authority (the page only uses this to build forms and warn early)."""
+    return {
+        "top_level_keys": sorted(TOP_LEVEL_KEYS),
+        "rule_keys": sorted(RULE_KEYS),
+        "actions": list(ACTIONS),
+        "max_rules": MAX_RULES,
+        "match": {"keys": MATCH_SCHEMA, "rules": MATCH_RULES},
+        # What the text rule's profiles allow, for the editor's preview and sample check
+        "text": {"encodings": list(ENCODINGS), "profiles": TEXT_PROFILES,
+                 "formula_start": FORMULA_START, "shell_and_markup": SHELL_AND_MARKUP},
+        "rule_types": {
+            name: {
+                "description": (cls.__doc__ or "").strip().splitlines()[0],
+                "actions": list(cls.ACTIONS),
+                "params": cls.PARAM_SCHEMA,
+                "param_rules": cls.PARAM_RULES,
+                "is_check": cls.ACTIONS == ("DENY",),  # check rules must sit above the ALLOWs they protect
+                "presets": cls.PRESETS,
+            }
+            for name, cls in RULE_TYPES.items()
+        },
+    }
+
+
+if __name__ == "__main__":
+    # Used by the Rakefile to write public/eaglegate_rules_schema.json for the tool page
+    import sys
+
+    json.dump(rules_schema(), sys.stdout, indent=2, sort_keys=True)
+    sys.stdout.write("\n")

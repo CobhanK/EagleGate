@@ -444,6 +444,6 @@ def test_reconnect_publishes_when_untrusted_clears_or_rules_change(valkey, monke
     assert valkey.status[-1]["CONNECTION_UNTRUSTED"] == "TRUE"
     proto.connect_reset()
     assert valkey.status[-1]["CONNECTION_UNTRUSTED"] == "FALSE"  # at once, not throttled
-    store.text = rules_json([], version=7)
+    store.active = rules_json([], version=7)  # e.g. applied by another interface
     proto.connect_reset()
     assert valkey.status[-1]["RULES_VERSION"] == 7

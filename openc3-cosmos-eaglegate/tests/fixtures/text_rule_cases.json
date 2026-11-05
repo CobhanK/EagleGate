@@ -1,0 +1,470 @@
+{
+  "_comment": "Field checks that eaglegate_text.py and textCheck.js must agree on (pytest and pnpm test run both). Expected reasons come from the Python implementation.",
+  "cases": [
+    {
+      "name": "safe text accepts a plain sentence",
+      "params": {
+        "encoding": "ascii",
+        "profile": "safe_text"
+      },
+      "field_hex": "42617474657279206e6f6d696e616c2031322e3156",
+      "expect": null
+    },
+    {
+      "name": "ANSI escape is refused",
+      "params": {
+        "encoding": "ascii",
+        "profile": "printable"
+      },
+      "field_hex": "6f6b1b5b324a",
+      "expect": "byte 0x1B (ESC) at offset 2 is not allowed by profile printable"
+    },
+    {
+      "name": "CR LF log forging is refused",
+      "params": {
+        "encoding": "ascii",
+        "profile": "printable"
+      },
+      "field_hex": "6f6b0d0a46414b45204c4f47",
+      "expect": "byte 0x0D (CR) at offset 2 is not allowed by profile printable"
+    },
+    {
+      "name": "command substitution is refused by safe_text",
+      "params": {
+        "encoding": "ascii",
+        "profile": "safe_text"
+      },
+      "field_hex": "66696c6524287265626f6f7429",
+      "expect": "byte 0x24 '$' at offset 4 is not allowed by profile safe_text"
+    },
+    {
+      "name": "backtick is refused by safe_text",
+      "params": {
+        "encoding": "ascii",
+        "profile": "safe_text"
+      },
+      "field_hex": "6160696460",
+      "expect": "byte 0x60 (backtick) at offset 1 is not allowed by profile safe_text"
+    },
+    {
+      "name": "semicolon allowed by printable",
+      "params": {
+        "encoding": "ascii",
+        "profile": "printable"
+      },
+      "field_hex": "613b2062",
+      "expect": null
+    },
+    {
+      "name": "script tag is refused by safe_text",
+      "params": {
+        "encoding": "ascii",
+        "profile": "safe_text"
+      },
+      "field_hex": "3c7363726970743e",
+      "expect": "byte 0x3C '<' at offset 0 is not allowed by profile safe_text"
+    },
+    {
+      "name": "log4shell lookup is refused by safe_text",
+      "params": {
+        "encoding": "ascii",
+        "profile": "safe_text"
+      },
+      "field_hex": "78247b6a6e64693a6c6461703a2f2f617d",
+      "expect": "byte 0x24 '$' at offset 1 is not allowed by profile safe_text"
+    },
+    {
+      "name": "printf format is refused by safe_text",
+      "params": {
+        "encoding": "ascii",
+        "profile": "safe_text"
+      },
+      "field_hex": "256e256e",
+      "expect": "byte 0x25 '%' at offset 0 is not allowed by profile safe_text"
+    },
+    {
+      "name": "formula start is refused",
+      "params": {
+        "encoding": "ascii",
+        "profile": "safe_text"
+      },
+      "field_hex": "3d48595045524c494e4b283129",
+      "expect": "starts with 0x3D '=', which spreadsheets treat as a formula"
+    },
+    {
+      "name": "formula start allowed when switched off",
+      "params": {
+        "encoding": "ascii",
+        "profile": "safe_text",
+        "no_formula_start": false
+      },
+      "field_hex": "3d312b31",
+      "expect": null
+    },
+    {
+      "name": "plus and at formula starts",
+      "params": {
+        "encoding": "ascii",
+        "profile": "printable"
+      },
+      "field_hex": "4053554d283129",
+      "expect": "starts with 0x40 '@', which spreadsheets treat as a formula"
+    },
+    {
+      "name": "identifier accepts a mode name",
+      "params": {
+        "encoding": "ascii",
+        "profile": "identifier"
+      },
+      "field_hex": "534146455f4d4f44452e32",
+      "expect": null
+    },
+    {
+      "name": "identifier refuses a space",
+      "params": {
+        "encoding": "ascii",
+        "profile": "identifier"
+      },
+      "field_hex": "53414645204d4f4445",
+      "expect": "byte 0x20 (space) at offset 4 is not allowed by profile identifier"
+    },
+    {
+      "name": "identifier refuses a leading dash (argument injection)",
+      "params": {
+        "encoding": "ascii",
+        "profile": "identifier"
+      },
+      "field_hex": "2d7266",
+      "expect": "byte 0x2D '-' is not allowed as the first character by profile identifier"
+    },
+    {
+      "name": "path accepts an absolute file name",
+      "params": {
+        "encoding": "ascii",
+        "profile": "path",
+        "deny_substrings": [
+          ".."
+        ]
+      },
+      "field_hex": "2f63662f646174615f30312e62696e",
+      "expect": null
+    },
+    {
+      "name": "path refuses traversal",
+      "params": {
+        "encoding": "ascii",
+        "profile": "path",
+        "deny_substrings": [
+          ".."
+        ]
+      },
+      "field_hex": "2f63662f2e2e2f2e2e2f6574632f706173737764",
+      "expect": "contains denied substring #1 \"..\""
+    },
+    {
+      "name": "denied substrings are case-insensitive",
+      "params": {
+        "encoding": "ascii",
+        "profile": "printable",
+        "deny_substrings": [
+          "DROP TABLE"
+        ]
+      },
+      "field_hex": "783b2064726f70207461626c6520686b",
+      "expect": "contains denied substring #1 \"drop table\""
+    },
+    {
+      "name": "hex profile",
+      "params": {
+        "encoding": "ascii",
+        "profile": "hex"
+      },
+      "field_hex": "44454144626565663031",
+      "expect": null
+    },
+    {
+      "name": "hex profile refuses g",
+      "params": {
+        "encoding": "ascii",
+        "profile": "hex"
+      },
+      "field_hex": "4445414442454547",
+      "expect": "byte 0x47 'G' at offset 7 is not allowed by profile hex"
+    },
+    {
+      "name": "numeric accepts an entity id",
+      "params": {
+        "encoding": "ascii",
+        "profile": "numeric"
+      },
+      "field_hex": "302e3234",
+      "expect": null
+    },
+    {
+      "name": "non-ASCII byte refused in ascii",
+      "params": {
+        "encoding": "ascii",
+        "profile": "printable"
+      },
+      "field_hex": "41e2808e42",
+      "expect": "byte 0xE2 (non-ASCII) at offset 1 is not allowed by profile printable"
+    },
+    {
+      "name": "NUL padding is stripped",
+      "params": {
+        "encoding": "ascii",
+        "profile": "identifier"
+      },
+      "field_hex": "4f4b000000",
+      "expect": null
+    },
+    {
+      "name": "data hidden after the NUL",
+      "params": {
+        "encoding": "ascii",
+        "profile": "identifier"
+      },
+      "field_hex": "4f4b0000585858",
+      "expect": "data after the NUL terminator at offset 4"
+    },
+    {
+      "name": "space padding is stripped",
+      "params": {
+        "encoding": "ascii",
+        "profile": "identifier",
+        "padding": "space"
+      },
+      "field_hex": "4f4b202020",
+      "expect": null
+    },
+    {
+      "name": "no padding: a NUL is just a bad byte",
+      "params": {
+        "encoding": "ascii",
+        "profile": "identifier",
+        "padding": "none"
+      },
+      "field_hex": "4f4b00",
+      "expect": "byte 0x00 (NUL) at offset 2 is not allowed by profile identifier"
+    },
+    {
+      "name": "min_length after padding",
+      "params": {
+        "encoding": "ascii",
+        "profile": "identifier",
+        "min_length": 1
+      },
+      "field_hex": "000000",
+      "expect": "text is 0 bytes, shorter than min_length 1"
+    },
+    {
+      "name": "max_length",
+      "params": {
+        "encoding": "ascii",
+        "profile": "identifier",
+        "max_length": 3
+      },
+      "field_hex": "41424344",
+      "expect": "text is 4 bytes, longer than max_length 3"
+    },
+    {
+      "name": "also_allow adds characters",
+      "params": {
+        "encoding": "ascii",
+        "profile": "identifier",
+        "also_allow": " :"
+      },
+      "field_hex": "4d4f44453a2053414645",
+      "expect": null
+    },
+    {
+      "name": "also_deny removes characters",
+      "params": {
+        "encoding": "ascii",
+        "profile": "printable",
+        "also_deny": "%"
+      },
+      "field_hex": "31303025",
+      "expect": "byte 0x25 '%' at offset 3 is not allowed by profile printable"
+    },
+    {
+      "name": "custom profile",
+      "params": {
+        "encoding": "ascii",
+        "profile": "custom",
+        "also_allow": "A-F0-9"
+      },
+      "field_hex": "41423132435a",
+      "expect": "byte 0x5A 'Z' at offset 5 is not allowed by profile custom"
+    },
+    {
+      "name": "utf8 accepts accented text",
+      "params": {
+        "encoding": "utf8",
+        "profile": "safe_text"
+      },
+      "field_hex": "54656d70c3a9726174757265206e6f6d696e616c65",
+      "expect": null
+    },
+    {
+      "name": "utf8 refuses a right-to-left override (Trojan Source)",
+      "params": {
+        "encoding": "utf8",
+        "profile": "printable"
+      },
+      "field_hex": "616263e280ae64636261",
+      "expect": "character U+202E at offset 3 is not allowed: control, format or unassigned character"
+    },
+    {
+      "name": "utf8 refuses zero-width space",
+      "params": {
+        "encoding": "utf8",
+        "profile": "printable"
+      },
+      "field_hex": "6164e2808b6d696e",
+      "expect": "character U+200B at offset 2 is not allowed: control, format or unassigned character"
+    },
+    {
+      "name": "utf8 refuses C1 control CSI",
+      "params": {
+        "encoding": "utf8",
+        "profile": "printable"
+      },
+      "field_hex": "41c29b324a",
+      "expect": "character U+009B at offset 1 is not allowed: control, format or unassigned character"
+    },
+    {
+      "name": "utf8 refuses line separator",
+      "params": {
+        "encoding": "utf8",
+        "profile": "printable"
+      },
+      "field_hex": "61e280a862",
+      "expect": "character U+2028 at offset 1 is not allowed: line or paragraph separator"
+    },
+    {
+      "name": "utf8 refuses full-width semicolon (NFKC)",
+      "params": {
+        "encoding": "utf8",
+        "profile": "safe_text"
+      },
+      "field_hex": "61efbc9b726d",
+      "expect": "character U+FF1B at offset 1 is not allowed: it normalizes (NFKC) to 0x3B ';', which profile safe_text does not allow"
+    },
+    {
+      "name": "utf8 refuses invalid bytes",
+      "params": {
+        "encoding": "utf8",
+        "profile": "printable"
+      },
+      "field_hex": "41ff42",
+      "expect": "invalid UTF-8 at offset 1"
+    },
+    {
+      "name": "utf8 refuses an overlong encoding",
+      "params": {
+        "encoding": "utf8",
+        "profile": "printable"
+      },
+      "field_hex": "41c0af",
+      "expect": "invalid UTF-8 at offset 1"
+    },
+    {
+      "name": "utf8 refuses a truncated sequence",
+      "params": {
+        "encoding": "utf8",
+        "profile": "printable"
+      },
+      "field_hex": "41e282",
+      "expect": "invalid UTF-8 at offset 1"
+    },
+    {
+      "name": "utf8 refuses an encoded surrogate",
+      "params": {
+        "encoding": "utf8",
+        "profile": "printable"
+      },
+      "field_hex": "eda080",
+      "expect": "invalid UTF-8 at offset 0"
+    },
+    {
+      "name": "utf8 identifier allows no non-ASCII by default",
+      "params": {
+        "encoding": "utf8",
+        "profile": "identifier"
+      },
+      "field_hex": "4d4f44455fc3a9",
+      "expect": "character U+00E9 at offset 5 is not allowed: profile identifier allows no other characters"
+    },
+    {
+      "name": "utf8 identifier with also_allow",
+      "params": {
+        "encoding": "utf8",
+        "profile": "identifier",
+        "also_allow": "é"
+      },
+      "field_hex": "4d4f44455fc3a9",
+      "expect": null
+    },
+    {
+      "name": "utf8 ASCII-only text takes the fast path",
+      "params": {
+        "encoding": "utf8",
+        "profile": "identifier"
+      },
+      "field_hex": "4d4f44453b58",
+      "expect": "byte 0x3B ';' at offset 4 is not allowed by profile identifier"
+    },
+    {
+      "name": "raw: every byte allowed by default",
+      "params": {
+        "encoding": "raw",
+        "padding": "none"
+      },
+      "field_hex": "00ff1b7f",
+      "expect": null
+    },
+    {
+      "name": "raw: 7-bit only",
+      "params": {
+        "encoding": "raw",
+        "padding": "none",
+        "allow_bytes": "0x00-0x7F"
+      },
+      "field_hex": "0041ff",
+      "expect": "byte 0xFF (non-ASCII) at offset 2 is not allowed"
+    },
+    {
+      "name": "raw: deny ESC",
+      "params": {
+        "encoding": "raw",
+        "padding": "none",
+        "deny_bytes": "0x1B, 0x9B"
+      },
+      "field_hex": "41421b",
+      "expect": "byte 0x1B (ESC) at offset 2 is not allowed"
+    },
+    {
+      "name": "raw: denied byte sequence",
+      "params": {
+        "encoding": "raw",
+        "padding": "none",
+        "deny_substrings": [
+          "1b5b"
+        ]
+      },
+      "field_hex": "001b5b32",
+      "expect": "contains denied byte sequence #1 (1b5b)"
+    },
+    {
+      "name": "raw: decimal byte values",
+      "params": {
+        "encoding": "raw",
+        "padding": "none",
+        "allow_bytes": "48-57"
+      },
+      "field_hex": "3132333a",
+      "expect": "byte 0x3A ':' at offset 3 is not allowed"
+    }
+  ]
+}
