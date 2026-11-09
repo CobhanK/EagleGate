@@ -1,0 +1,3 @@
+# Python dependencies
+# None: frame parsing, CRC and anti-replay use only the standard library.
+# Phase 2 (CryptoLib) runs in a separate sidecar process with its own dependencies.

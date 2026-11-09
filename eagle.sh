@@ -8,6 +8,9 @@ PARENT_DIR="$(dirname "$SCRIPT_DIR")"
 SRC="$SCRIPT_DIR/openc3-cosmos-eaglegate"
 DEST_PARENT="$PARENT_DIR/cosmos"
 DEST="$DEST_PARENT/openc3-cosmos-eaglegate"
+# The SDLS extension plugin (needs the core plugin installed first)
+SDLS_SRC="$SCRIPT_DIR/openc3-cosmos-eaglegate-sdls"
+SDLS_DEST="$DEST_PARENT/openc3-cosmos-eaglegate-sdls"
 
 # echo $SCRIPT_DIR
 # echo $SRC
@@ -49,22 +52,40 @@ if [[ ! "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
     exit 1
 fi
 
+# Copy one plugin folder into cosmos (replacing an old copy) and build its gem
+build_plugin() {
+    local src="$1" dest="$2"
+    # Remove any previous copy so the result is always a fresh copy
+    rm -rf "$dest"
+    cp -R "$src" "$dest"
+    echo "Copied $dest into $DEST_PARENT"
+    (cd "$dest" && ../openc3.sh cli rake build VERSION="$VERSION")
+}
+
+clean_plugin() {
+    local dest="$1"
+    if [[ -d "$dest" ]]; then
+        rm -rf "$dest"
+        echo "Removed $dest"
+    else
+        echo "Nothing to clean: $dest does not exist"
+    fi
+}
+
 case "$COMMAND" in
     build)
-        # Remove any previous copy so the result is always a fresh copy
-        rm -rf "$DEST"
-        cp -R "$SRC" "$DEST"
-        echo "Copied $DEST into $DEST_PARENT"
-        cd $DEST
-        ../openc3.sh cli rake build VERSION="$VERSION"
+        build_plugin "$SRC" "$DEST"
+        ;;
+    build-sdls)
+        build_plugin "$SDLS_SRC" "$SDLS_DEST"
+        ;;
+    build-all)
+        build_plugin "$SRC" "$DEST"
+        build_plugin "$SDLS_SRC" "$SDLS_DEST"
         ;;
     clean)
-        if [[ -d "$DEST" ]]; then
-            rm -rf "$DEST"
-            echo "Removed $DEST"
-        else
-            echo "Nothing to clean: $DEST does not exist"
-        fi
+        clean_plugin "$DEST"
+        clean_plugin "$SDLS_DEST"
         ;;
     run)
         if [[ -d "$DEST" ]]; then
@@ -88,11 +109,13 @@ case "$COMMAND" in
         echo "Assuming cosmos is in the same folder as EagleGate:"
         echo "build [-v 1.x.x] : copies eaglegate into cosmos folder (deletes if exists there already)"
         echo "                   and builds the plugin gem (version defaults to $VERSION)"
-        echo "clean : removes eaglegate from cosmos folder"
+        echo "build-sdls [-v 1.x.x] : the same for the SDLS extension plugin (install the core plugin first)"
+        echo "build-all [-v 1.x.x]  : builds both plugins"
+        echo "clean : removes eaglegate and eaglegate-sdls from cosmos folder"
         echo "run|stop : starts or stops openc3 cosmos containers on local"  
     ;;
     *)
-        echo "Usage: $0 {build [-v 1.x.x]|clean|run|stop|help}" >&2
+        echo "Usage: $0 {build|build-sdls|build-all [-v 1.x.x]|clean|run|stop|help}" >&2
         exit 1
         ;;
 esac

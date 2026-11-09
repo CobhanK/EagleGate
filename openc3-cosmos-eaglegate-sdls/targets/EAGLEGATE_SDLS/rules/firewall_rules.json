@@ -1,0 +1,65 @@
+{
+  "version": 1,
+  "description": "EagleGate behind the SDLS frame layer, set up for NOS3 telemetry. The link section mirrors NOS3's Crypto_SC_Init (components/cryptolib/src/core/crypto_config.c): check the field lengths against a captured frame (monitor mode) before enforcing. Packet rules can match link.vcid, link.spi and link.protection.",
+  "default_action": "DENY",
+  "settings": {
+    "untrust_on_first_packet_reject": false
+  },
+  "link": {
+    "frame_type": "TM",
+    "scid": 3,
+    "frame_length": 1786,
+    "asm": "1ACFFC1D",
+    "randomized": false,
+    "has_fecf": false,
+    "has_ocf": false,
+    "secondary_header": false,
+    "security_associations": {
+      "5": {"mode": "clear", "iv_len": 12},
+      "6": {"mode": "enc", "iv_len": 12, "replay": "iv"},
+      "7": {"mode": "auth", "sn_len": 2, "mac_len": 16, "replay": "sn"}
+    },
+    "virtual_channels": {
+      "1": {"spi": [5]},
+      "4": {"spi": [6]},
+      "5": {"spi": [7]}
+    },
+    "unverified_auth": "allow",
+    "encrypted_without_backend": "deny",
+    "frame_counter_gap": "warn",
+    "max_forward_jump": 1000,
+    "replay_baseline": "learn",
+    "verified_forward": "limit",
+    "idle": "drop",
+    "untrust_on_first_frame_reject": true,
+    "crypto": {"backend": "none"}
+  },
+  "rules": [
+    {
+      "id": "deny-commands-on-tlm-link",
+      "description": "Command-type packets never belong on the telemetry downlink",
+      "action": "DENY",
+      "match": {"packet_type": "CMD"}
+    },
+    {
+      "id": "example-no-clear-telemetry",
+      "description": "EXAMPLE (disabled): refuse telemetry that came in clear-mode frames (NOS3 sends on the clear VC 1 until TO_SET_VCID_CC switches it)",
+      "action": "DENY",
+      "enabled": false,
+      "match": {"link": {"protection": ["clear"]}}
+    },
+    {
+      "id": "example-cfdp-needs-authentication",
+      "description": "EXAMPLE (disabled): file transfer (CFDP, APID 0x7FD) only from authenticated frames; until the Phase 2 crypto backend checks MACs, auth_unverified is the best there is",
+      "action": "DENY",
+      "enabled": false,
+      "match": {"apid": ["0x7FD"], "link": {"protection": ["clear"]}}
+    },
+    {
+      "id": "allow-telemetry",
+      "description": "Every telemetry packet that passed the frame checks; narrow this to the mission's APIDs",
+      "action": "ALLOW",
+      "match": {"packet_type": "TLM"}
+    }
+  ]
+}

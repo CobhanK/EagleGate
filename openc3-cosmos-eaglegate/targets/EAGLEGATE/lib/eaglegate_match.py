@@ -3,9 +3,10 @@ from dataclasses import dataclass, field
 from functools import cached_property
 
 from eaglegate_ccsds_header import CMD, MAX_APID, MAX_PACKET, MIN_PACKET, TLM
+from eaglegate_extensions import MAX_LINK_INT
 from eaglegate_validate import no_unknown_keys, require, to_int
 
-MATCH_KEYS = {"apid", "apid_range", "packet_type", "sec_hdr", "min_length", "max_length", "bytes"}
+MATCH_KEYS = {"apid", "apid_range", "packet_type", "sec_hdr", "min_length", "max_length", "bytes", "link"}
 BYTE_KEYS = {"offset", "mask", "value"}
 
 # MATCH_KEYS and BYTE_KEYS described for the rules editor page (rules_schema())
@@ -22,8 +23,14 @@ MATCH_SCHEMA = {
                   "mask": {"type": "int", "min": 0, "max": 0xFF, "default": 0xFF},
                   "value": {"type": "int", "min": 0, "max": 0xFF, "required": True},
               }},
+    # The keys under "link" come from the extensions running on the interface
+    # (eaglegate_extensions.py); interface_details lists them per interface.
+    "link": {"type": "link_match", "help": "what the extension in front of the firewall knows about the "
+                                           "link the packet arrived on, e.g. its virtual channel; every key "
+                                           "must hold. Packets without link information never match"},
 }
-MATCH_RULES = ["apid_range low <= high", "min_length <= max_length", "bytes: value has no bits outside mask"]
+MATCH_RULES = ["apid_range low <= high", "min_length <= max_length", "bytes: value has no bits outside mask",
+               "link: only keys an extension on this interface provides"]
 
 
 @dataclass
@@ -40,8 +47,11 @@ class Match:
     min_length: int = None       # total packet bytes, inclusive
     max_length: int = None
     byte_checks: list = field(default_factory=list)  # (offset, mask, value) tuples
+    link: dict = None            # link key -> frozenset of allowed values
 
-    def holds(self, header, packet):
+    def holds(self, header, packet, link=None):
+        """`link`: what an extension knows about the link the packet arrived on
+        (eaglegate_extensions.link_of), or None for a plain packet interface."""
         if self.apids is not None and header.apid not in self.apids:
             return False
         if self.apid_min is not None and not (self.apid_min <= header.apid <= self.apid_max):
@@ -59,6 +69,12 @@ class Match:
                 return False  # packet too short to have this byte
             if packet[offset] & mask != value:
                 return False
+        if self.link is not None:
+            if link is None:
+                return False  # a plain packet carries no link information to check
+            for key, allowed in self.link.items():
+                if link.get(key) not in allowed:
+                    return False
         return True
 
     @cached_property
@@ -80,11 +96,14 @@ class Match:
             parts.append(f"length {low}..{high}")
         for offset, mask, value in self.byte_checks:
             parts.append(f"byte[{offset}] & 0x{mask:02X} == 0x{value:02X}")
+        for key, allowed in sorted((self.link or {}).items()):
+            parts.append(f"link {key} " + ",".join(str(v) for v in sorted(allowed, key=str)))
         return "matched " + ("; ".join(parts) if parts else "every packet")
 
     @classmethod
-    def parse(cls, raw, where):
-        """Build a Match from a rule's "match" object."""
+    def parse(cls, raw, where, link_keys=None):
+        """Build a Match from a rule's "match" object. link_keys: the link match
+        keys the interface's extensions provide (eaglegate_extensions.link_keys_of)."""
         require(isinstance(raw, dict), f"{where} must be an object")
         no_unknown_keys(raw, MATCH_KEYS, where)
         match = cls()
@@ -123,6 +142,9 @@ class Match:
             for index, check in enumerate(checks):
                 match.byte_checks.append(_parse_byte_check(check, f"{where}.bytes[{index}]"))
 
+        if "link" in raw:
+            match.link = _parse_link(raw["link"], link_keys or {}, f"{where}.link")
+
         return match
 
 
@@ -136,3 +158,23 @@ def _parse_byte_check(check, where):
     value = to_int(check["value"], f"{where}.value", 0, 0xFF)
     require(value & ~mask == 0, f"{where}.value has bits outside mask (can never match)")
     return (offset, mask, value)
+
+
+def _parse_link(raw, link_keys, where):
+    """Return {key: frozenset(allowed values)} for a "link" condition."""
+    require(link_keys, f"{where}: no extension on this interface provides link information "
+                       "(link conditions need e.g. the eaglegate-sdls plugin's frame protocol)")
+    require(isinstance(raw, dict) and raw, f"{where} must be a non-empty object")
+    no_unknown_keys(raw, link_keys, where)
+    result = {}
+    for key, values in raw.items():
+        spec = link_keys[key]
+        require(isinstance(values, list) and values, f"{where}.{key} must be a non-empty list")
+        if spec["type"] == "enum_list":
+            for value in values:
+                require(value in spec["values"], f"{where}.{key}: {value!r} is not one of {spec['values']}")
+            result[key] = frozenset(values)
+        else:
+            low, high = spec.get("min", 0), spec.get("max", MAX_LINK_INT)
+            result[key] = frozenset(to_int(value, f"{where}.{key}", low, high) for value in values)
+    return result

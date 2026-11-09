@@ -7,78 +7,13 @@ from conftest import (HK_STATUS_LENGTH, PLUGIN_TXT, STATUS_3_LENGTH, ccsds, hk_s
                       rules_json, shipped_rules_text, status_3)
 from eaglegate_firewall_protocol import EaglegateFirewallProtocol
 from eaglegate_ccsds_header import CcsdsHeader
-from eaglegate_rules_store import rules_keys
-from openc3.interfaces.interface import Interface
+from eaglegate_test_support import FakeRulesStore, ScriptedInterface
 from openc3.top_level import get_class_from_module
 from openc3.utilities.string import filename_to_class_name, filename_to_module
 
 # Exactly the strings plugin.txt passes after ERB substitution
 PLUGIN_ARGS = ["1024", "EAGLEGATE/rules/firewall_rules.json"]
 PROTOCOL_FILE = "eaglegate_firewall_protocol.py"
-
-
-class ScriptedInterface(Interface):
-    """Stands in for TCP: returns scripted chunks, then asks to disconnect."""
-
-    def __init__(self, chunks=()):
-        super().__init__()
-        self.chunks = list(chunks)
-        self.name = "EAGLEGATE_INT"
-
-    def connected(self):
-        return True
-
-    def read_interface(self):
-        if not self.chunks:
-            return (None, None)
-        data = self.chunks.pop(0)
-        self.read_interface_base(data, None)
-        return (data, None)
-
-
-class FakeRulesStore:
-    """Stands in for eaglegate_rules_store.RulesStore (the COSMOS config bucket).
-
-    original: the plugin's rules/firewall_rules.json
-    active:   rules_active.json (only the firewall writes it)
-    pending:  rules_pending.json (what an admin uploads); `text` is an alias,
-              so a test sets store.text and then sends RELOAD_RULES"""
-
-    def __init__(self, original):
-        self.original = original
-        self.active = None
-        self.active_signature = None  # the HMAC stored as metadata on the active object
-        self.pending = None
-        self.saved = []           # (version, sha256) of every save_active
-        self.fail_save = False    # make save_active fail, like a bucket outage
-        self.keys = rules_keys("DEFAULT", "EAGLEGATE")
-        self.last_error = None
-
-    @property
-    def text(self):
-        return self.pending
-
-    @text.setter
-    def text(self, value):
-        self.pending = value
-
-    def read_original(self):
-        return self.original
-
-    def read_active(self):
-        return self.active, self.active_signature
-
-    def read_pending(self):
-        return self.pending
-
-    def save_active(self, text, version, sha256, signature=None):
-        if self.fail_save:
-            self.last_error = "ConnectionError: bucket down"
-            return False
-        self.active = text
-        self.active_signature = signature
-        self.saved.append((version, sha256))
-        return True
 
 
 def build(chunks=(), rules=None, connect=True):
@@ -287,11 +222,11 @@ def test_error_while_evaluating_denies_packet_and_keeps_running(log):
     real_evaluate = proto.ruleset.evaluate
     calls = []
 
-    def evaluate_failing_on_second_packet(packet):
+    def evaluate_failing_on_second_packet(packet, **kwargs):
         calls.append(packet)
         if len(calls) == 2:
             raise RuntimeError("boom")
-        return real_evaluate(packet)
+        return real_evaluate(packet, **kwargs)
 
     proto.ruleset.evaluate = evaluate_failing_on_second_packet
     assert apids(read_all(iface)) == [2, 3]  # the second packet is dropped, nothing else

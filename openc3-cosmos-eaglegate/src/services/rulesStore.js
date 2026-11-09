@@ -1,17 +1,22 @@
 // Talks to COSMOS for the rules editor: the firewall's interface details, the
-// config bucket keys holding the rules, and the RELOAD_RULES protocol command.
+// config bucket keys holding the rules, the RELOAD_RULES protocol command, and
+// admin requests (RESTORE_TRUST and extension commands).
+//
+// Every interface whose config has the firewall protocol can be edited: the
+// core plugin's EAGLEGATE_INT, and interfaces of extension plugins such as
+// eaglegate-sdls. Each keeps its own rules, under its own target.
 //
 // Who may change the rules is enforced by the COSMOS server, not here: the
 // pending key lives outside targets_modified, so the storage API only hands
 // out an upload URL to admins (Enterprise) or logged in users (Core). See
 // targets/EAGLEGATE/lib/eaglegate_rules_store.py.
 
-import axios from 'axios'
 import { Api, OpenC3Api } from '@openc3/js-common/services'
+import { buildAdminRequest } from '../tools/eaglegate/adminRequest.js'
 
-export const TARGET = 'EAGLEGATE' // change if the target was renamed at install time
-export const INTERFACE = `${TARGET}_INT`
+export const DEFAULT_INTERFACE = 'EAGLEGATE_INT'
 const PROTOCOL_CLASS = 'EaglegateFirewallProtocol'
+const PROTOCOL_FILE = 'eaglegate_firewall_protocol.py'
 const CONFIG_BUCKET = 'OPENC3_CONFIG_BUCKET'
 const APPLY_TIMEOUT_MS = 10000
 const POLL_MS = 500
@@ -43,14 +48,38 @@ export function userIsAdmin() {
   }
 }
 
+// Interfaces that run the firewall, from their saved COSMOS config (works while
+// they are stopped): [{ name, target, protocols: [file names, in order] }]
+export async function firewallInterfaces() {
+  const names = await api.get_interface_names()
+  const configs = await Promise.all(
+    names.map((name) => api.exec('get_interface', [name]).catch(() => null)),
+  )
+  const result = []
+  for (const config of configs) {
+    const protocols = (config?.protocols || []).filter(
+      (p) => String(p[0]).toUpperCase() !== 'WRITE',
+    )
+    const firewall = protocols.find((p) => String(p[1]).endsWith(PROTOCOL_FILE))
+    if (!firewall) continue
+    const rulesFile = firewall[3] || 'EAGLEGATE/rules/firewall_rules.json'
+    result.push({
+      name: config.name,
+      target: rulesFile.split('/')[0],
+      protocols: protocols.map((p) => String(p[1]).split('/').pop()),
+    })
+  }
+  return result.sort((a, b) => a.name.localeCompare(b.name))
+}
+
 // The "firewall" section the protocol adds to interface_details()
-export async function firewallState() {
-  const details = await api.interface_details(INTERFACE)
+export async function firewallState(iface) {
+  const details = await api.interface_details(iface)
   const protocol = (details.read_protocols || []).find(
     (p) => p.name === PROTOCOL_CLASS,
   )
   if (!protocol) {
-    throw new Error(`${INTERFACE} has no ${PROTOCOL_CLASS} read protocol`)
+    throw new Error(`${iface} has no ${PROTOCOL_CLASS} read protocol`)
   }
   return protocol.firewall
 }
@@ -97,7 +126,18 @@ export async function uploadKey(key, text) {
     }
     throw error
   }
-  await axios({ ...presigned, data: text })
+  // The presigned request (storage_controller.rb get_upload_presigned_request):
+  // { url, headers, method }. Plain fetch: no HTTP client package needed
+  const response = await fetch(presigned.url, {
+    method: String(presigned.method || 'put').toUpperCase(),
+    headers: presigned.headers || {},
+    body: text,
+  })
+  if (!response.ok) {
+    throw new Error(
+      `Upload of ${key} failed: HTTP ${response.status} ${response.statusText}`,
+    )
+  }
 }
 
 // Names of the saved versions, newest first ("000003-abcdef123456.json")
@@ -119,19 +159,19 @@ export async function listHistory(prefix) {
 // Upload text as the pending rules, ask the firewall to apply them, and wait
 // for the result. Resolves with the new firewall state; rejects with the
 // firewall's reason when it refused (nothing changed then).
-export async function applyRules(text, baseSha256) {
-  const before = await firewallState()
+export async function applyRules(iface, text, baseSha256) {
+  const before = await firewallState(iface)
   const pendingSha256 = await sha256(text)
   await uploadKey(before.rules_keys.pending, text)
   await api.exec(
     'interface_protocol_cmd',
-    [INTERFACE, 'RELOAD_RULES', baseSha256, pendingSha256],
+    [iface, 'RELOAD_RULES', baseSha256, pendingSha256],
     { read_write: 'READ' },
   )
   // interface_protocol_cmd is fire-and-forget, so poll for the result
   const deadline = Date.now() + APPLY_TIMEOUT_MS
   while (Date.now() < deadline) {
-    const state = await firewallState()
+    const state = await firewallState(iface)
     if (state.rules.sha256 === pendingSha256) return state
     if (
       state.rules_error_at &&
@@ -144,7 +184,47 @@ export async function applyRules(text, baseSha256) {
     await new Promise((resolve) => setTimeout(resolve, POLL_MS))
   }
   throw new Error(
-    `No answer from ${INTERFACE} after ${APPLY_TIMEOUT_MS / 1000}s; is the interface running? Check its log in Admin`,
+    `No answer from ${iface} after ${APPLY_TIMEOUT_MS / 1000}s; is the interface running? Check its log in Admin`,
+  )
+}
+
+function userName() {
+  try {
+    const user = OpenC3Auth.user?.()
+    return user?.preferred_username || user?.name || ''
+  } catch {
+    return ''
+  }
+}
+
+// An admin-only action: upload requests/{kind}.json (only admins may), send
+// the command with its sha256, and wait for the firewall's answer in
+// interface_details. Resolves with { ok, detail, ... }; the firewall writes
+// the same entry to its audit stream.
+export async function adminAction(iface, kind, command, reason, params = {}) {
+  const before = await firewallState(iface)
+  const text = buildAdminRequest({
+    kind,
+    reason,
+    params,
+    requestedBy: userName(),
+  })
+  const requestSha256 = await sha256(text)
+  await uploadKey(`${before.rules_keys.requests}${kind}.json`, text)
+  await api.exec('interface_protocol_cmd', [iface, command, requestSha256], {
+    read_write: 'READ',
+  })
+  const deadline = Date.now() + APPLY_TIMEOUT_MS
+  while (Date.now() < deadline) {
+    const state = await firewallState(iface)
+    const answer = (state.admin_actions || []).find(
+      (a) => a.request_sha256 === requestSha256,
+    )
+    if (answer) return { ...answer, state }
+    await new Promise((resolve) => setTimeout(resolve, POLL_MS))
+  }
+  throw new Error(
+    `No answer from ${iface} after ${APPLY_TIMEOUT_MS / 1000}s; is the interface running?`,
   )
 }
 

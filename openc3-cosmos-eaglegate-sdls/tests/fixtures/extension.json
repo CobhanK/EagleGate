@@ -1,0 +1,309 @@
+{
+  "api_versions": [
+    1,
+    1
+  ],
+  "layers": [
+    "frame",
+    "sdls",
+    "reassembly"
+  ],
+  "link_keys": {
+    "protection": {
+      "help": "what the frame(s) guaranteed: clear, auth_unverified (an authenticated SA, MAC not checked yet), enc, auth or authenc (checked by the crypto backend). A packet that spans frames gets the weakest",
+      "type": "enum_list",
+      "values": [
+        "clear",
+        "auth_unverified",
+        "enc",
+        "auth",
+        "authenc"
+      ]
+    },
+    "spi": {
+      "help": "Security Association protecting the frame(s) the packet came in",
+      "max": 65535,
+      "min": 0,
+      "type": "int_list"
+    },
+    "vcid": {
+      "help": "virtual channel the packet arrived on",
+      "max": 7,
+      "min": 0,
+      "type": "int_list"
+    }
+  },
+  "name": "sdls",
+  "schema": {
+    "fields": {
+      "asm": {
+        "allow_empty": true,
+        "default": "1ACFFC1D",
+        "help": "sync marker before each frame, as hex; empty when frames arrive one per datagram, already aligned",
+        "type": "string"
+      },
+      "crypto": {
+        "fields": {
+          "backend": {
+            "default": "none",
+            "help": "who verifies and decrypts frames",
+            "type": "enum",
+            "value_help": {
+              "none": "nobody: authenticated frames stay auth_unverified, encrypted frames unreadable"
+            },
+            "values": [
+              "none"
+            ]
+          }
+        },
+        "help": "the crypto backend (Phase 2)",
+        "type": "object"
+      },
+      "encrypted_without_backend": {
+        "default": "deny",
+        "help": "frames of encrypting SAs, which cannot be read without the crypto backend",
+        "type": "enum",
+        "value_help": {
+          "deny": "reject and quarantine them",
+          "drop": "drop them, counting only (no quarantine)"
+        },
+        "values": [
+          "deny",
+          "drop"
+        ]
+      },
+      "frame_counter_gap": {
+        "default": "warn",
+        "help": "a frame whose virtual channel frame count skipped (frames lost, injected or replayed)",
+        "type": "enum",
+        "value_help": {
+          "deny": "reject it",
+          "ignore": "do not track counts",
+          "warn": "accept it and count the gap"
+        },
+        "values": [
+          "warn",
+          "deny",
+          "ignore"
+        ]
+      },
+      "frame_length": {
+        "help": "bytes per frame, without the sync marker",
+        "max": 2048,
+        "min": 16,
+        "required": true,
+        "type": "int"
+      },
+      "frame_type": {
+        "default": "TM",
+        "help": "transfer frame type",
+        "type": "enum",
+        "values": [
+          "TM"
+        ]
+      },
+      "has_fecf": {
+        "default": false,
+        "help": "frames end with a CRC-16 (FECF)",
+        "type": "bool"
+      },
+      "has_ocf": {
+        "default": false,
+        "help": "the OCF flag every frame must have",
+        "type": "bool"
+      },
+      "idle": {
+        "default": "drop",
+        "help": "idle packets (APID 0x7FF)",
+        "type": "enum",
+        "value_help": {
+          "drop": "count and drop them",
+          "keep": "pass them to the firewall"
+        },
+        "values": [
+          "drop",
+          "keep"
+        ]
+      },
+      "max_forward_jump": {
+        "default": 1000,
+        "help": "how far a sequence number or IV may jump ahead of the last accepted one. Set it at least as high as the block the spacecraft reserves when it saves its counters",
+        "max": 9223372036854775807,
+        "min": 1,
+        "type": "int"
+      },
+      "randomized": {
+        "default": false,
+        "help": "frames are CCSDS pseudo-randomized",
+        "type": "bool"
+      },
+      "replay_baseline": {
+        "default": "learn",
+        "help": "when there is no last accepted counter for an SA",
+        "type": "enum",
+        "value_help": {
+          "learn": "accept the first frame and remember its counter",
+          "require": "reject until an admin sets a floor (Reset counter)"
+        },
+        "values": [
+          "learn",
+          "require"
+        ]
+      },
+      "scid": {
+        "help": "spacecraft ID every frame must carry",
+        "max": 1023,
+        "min": 0,
+        "required": true,
+        "type": "int"
+      },
+      "secondary_header": {
+        "default": false,
+        "help": "the secondary header flag every frame must have",
+        "type": "bool"
+      },
+      "security_associations": {
+        "help": "by SPI; the field lengths must match the spacecraft's SAs",
+        "key": {
+          "max": 65535,
+          "min": 0,
+          "title": "SPI",
+          "type": "int"
+        },
+        "required": true,
+        "type": "map",
+        "value": {
+          "fields": {
+            "iv_len": {
+              "default": 0,
+              "help": "IV field bytes in the header",
+              "max": 64,
+              "min": 0,
+              "type": "int"
+            },
+            "mac_len": {
+              "default": 0,
+              "help": "MAC bytes in the trailer",
+              "max": 64,
+              "min": 0,
+              "type": "int"
+            },
+            "max_forward_jump": {
+              "help": "this SA's limit on how far the counter may jump ahead (default: the link's)",
+              "max": 9223372036854775807,
+              "min": 1,
+              "type": "int"
+            },
+            "mode": {
+              "default": null,
+              "help": "what the SA does to the frame",
+              "required": true,
+              "type": "enum",
+              "value_help": {
+                "auth": "MAC only",
+                "authenc": "authenticated encryption",
+                "clear": "no protection",
+                "enc": "encryption only (no integrity)"
+              },
+              "values": [
+                "clear",
+                "auth",
+                "enc",
+                "authenc"
+              ]
+            },
+            "pl_len": {
+              "default": 0,
+              "help": "pad length field bytes in the header",
+              "max": 2,
+              "min": 0,
+              "type": "int"
+            },
+            "replay": {
+              "default": null,
+              "help": "anti-replay counter (default: sn when the SA has a sequence number, else iv for encrypting SAs with an IV, else none)",
+              "type": "enum",
+              "value_help": {
+                "iv": "the IV must increase (GCM counter IVs)",
+                "none": "no anti-replay check",
+                "sn": "the sequence number must increase"
+              },
+              "values": [
+                "none",
+                "sn",
+                "iv"
+              ]
+            },
+            "sn_len": {
+              "default": 0,
+              "help": "sequence number (ARSN) field bytes in the header",
+              "max": 16,
+              "min": 0,
+              "type": "int"
+            }
+          },
+          "type": "object"
+        }
+      },
+      "untrust_on_first_frame_reject": {
+        "default": true,
+        "help": "when the first frame has the wrong spacecraft ID, virtual channel, SPI or layout, discard everything until the interface reconnects or an admin restores trust. Corrupted frames, replays and counter gaps never count",
+        "title": "Distrust the connection if its first frame is rejected",
+        "type": "bool"
+      },
+      "unverified_auth": {
+        "default": "allow",
+        "help": "frames of authenticated SAs whose MAC no crypto backend checked",
+        "type": "enum",
+        "value_help": {
+          "allow": "pass them on as auth_unverified (rules can still deny)",
+          "deny": "reject them"
+        },
+        "values": [
+          "allow",
+          "deny"
+        ]
+      },
+      "verified_forward": {
+        "default": "limit",
+        "help": "counter jumps on frames whose MAC the crypto backend verified",
+        "type": "enum",
+        "value_help": {
+          "any": "accept any increase (only a key holder can forge one)",
+          "limit": "apply max_forward_jump"
+        },
+        "values": [
+          "limit",
+          "any"
+        ]
+      },
+      "virtual_channels": {
+        "help": "by VCID: frames on any other virtual channel are rejected",
+        "key": {
+          "max": 7,
+          "min": 0,
+          "title": "VCID",
+          "type": "int"
+        },
+        "required": true,
+        "type": "map",
+        "value": {
+          "fields": {
+            "spi": {
+              "help": "SPIs allowed to protect this virtual channel",
+              "max": 65535,
+              "min": 0,
+              "required": true,
+              "type": "int_list"
+            }
+          },
+          "type": "object"
+        }
+      }
+    },
+    "help": "How the spacecraft frames and protects telemetry on this interface. The security associations must match the spacecraft's.",
+    "type": "object"
+  },
+  "section": "link",
+  "version": "0.1.0"
+}

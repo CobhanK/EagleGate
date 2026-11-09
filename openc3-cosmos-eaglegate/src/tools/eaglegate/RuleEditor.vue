@@ -140,6 +140,49 @@
           Add byte check
         </v-btn>
 
+        <!-- Link conditions: keys come from the extension on this interface -->
+        <template v-if="hasLinkKeys || rule.match.link">
+          <div class="text-subtitle-2 mt-4">Link conditions</div>
+          <div class="text-caption">{{ matchSpec.link.help }}</div>
+          <div v-if="!hasLinkKeys" class="text-caption text-error">
+            No extension on this interface provides link information; remove
+            these conditions or edit the rules of an interface that has one.
+          </div>
+          <v-row dense>
+            <v-col v-for="(spec, key) in linkKeys" :key="key" cols="12" md="6">
+              <v-select
+                v-if="spec.type === 'enum_list'"
+                :model-value="rule.match.link?.[key] || []"
+                :items="spec.values"
+                :label="`link ${key}`"
+                :hint="spec.help"
+                persistent-hint
+                multiple
+                chips
+                closable-chips
+                :readonly="readonly"
+                @update:model-value="setLink(key, $event)"
+              />
+              <v-text-field
+                v-else
+                :model-value="(rule.match.link?.[key] || []).join(', ')"
+                :label="`link ${key}`"
+                :hint="hintFor({ ...spec, type: 'int_list' })"
+                persistent-hint
+                :readonly="readonly"
+                @update:model-value="setLinkInts(key, $event)"
+              />
+            </v-col>
+          </v-row>
+          <v-btn
+            v-if="!readonly && rule.match.link"
+            variant="text"
+            prepend-icon="mdi-close"
+            @click="clearLink"
+            >Remove link conditions</v-btn
+          >
+        </template>
+
         <template v-if="Object.keys(typeSpec.params).length">
           <div class="text-subtitle-1 mt-4">{{ type }} settings</div>
           <div
@@ -402,10 +445,18 @@ export default {
       return reason ? { denied: reason } : { allowed: true }
     },
     simpleMatchKeys() {
-      // Every match condition except "bytes", which has its own list editor
+      // Every match condition except "bytes" and "link", which have their own editors
       return Object.fromEntries(
-        Object.entries(this.matchSpec).filter(([key]) => key !== 'bytes'),
+        Object.entries(this.matchSpec).filter(
+          ([key]) => key !== 'bytes' && key !== 'link',
+        ),
       )
+    },
+    linkKeys() {
+      return this.matchSpec.link?.keys || {}
+    },
+    hasLinkKeys() {
+      return Object.keys(this.linkKeys).length > 0
     },
     errors() {
       // Validate the rule on its own, plus the id clash the page knows about
@@ -524,6 +575,23 @@ export default {
     setEnabled(on) {
       if (on) delete this.rule.enabled
       else this.rule.enabled = false
+    },
+    setLink(key, values) {
+      const link = { ...(this.rule.match.link || {}) }
+      if (values && values.length) link[key] = values
+      else delete link[key]
+      if (Object.keys(link).length) this.rule.match.link = link
+      else delete this.rule.match.link
+    },
+    setLinkInts(key, text) {
+      const values = String(text)
+        .split(',')
+        .map((part) => fromInput({ type: 'int' }, part))
+        .filter((v) => v !== undefined)
+      this.setLink(key, values)
+    },
+    clearLink() {
+      delete this.rule.match.link
     },
     addByteCheck() {
       this.rule.match.bytes = [

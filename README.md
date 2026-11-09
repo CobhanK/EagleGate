@@ -37,5 +37,9 @@ Rules live in `targets/EAGLEGATE/rules/firewall_rules.json` and are checked top 
 
 Each type's params are documented on its class in `lib/eaglegate_rule_types.py`. Apply edited rules on a live system with `EAGLEGATE/procedures/apply_firewall_rules.py`.
 
+## SDLS extension (`openc3-cosmos-eaglegate-sdls`)
+A second plugin that sits in front of the firewall. It receives SDLS-protected CCSDS TM transfer frames, checks them (spacecraft and virtual channel, SPI binding, anti-replay, frame counts) and hands the packets to the firewall. Packet rules can then match on `"link": {"vcid": ..., "spi": ..., "protection": ...}`. Install the core plugin first; build with `./EagleGate/eagle.sh build-sdls -v 1.x.x` (or `build-all`). Setup, including NOS3, is in `openc3-cosmos-eaglegate-sdls/README.md`.
+
 ## Tests
-From `openc3-cosmos-eaglegate`, with the dev requirements installed: `pytest`
+- Core: from `openc3-cosmos-eaglegate`, with the dev requirements installed: `pytest`; the tool page: `pnpm test`
+- SDLS: from `openc3-cosmos-eaglegate-sdls`: `pytest` (uses the core plugin next to it)

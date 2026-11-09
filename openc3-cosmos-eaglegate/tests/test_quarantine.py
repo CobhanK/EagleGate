@@ -193,7 +193,7 @@ def test_details_list_recent_reasons_newest_first_without_bytes(valkey):
     assert recent[0]["reason"] == "DENY by default action: no rule fired; default action DENY (rules v1)"
     assert recent[0]["entry_id"] == "25-0"
     assert all("bytes" not in r for r in recent)
-    assert fw["rejected_by_stage"] == {"RULE": 0, "DEFAULT": 25, "ERROR": 0, "STRUCTURAL": 0}
+    assert fw["rejected_by_stage"] == {"RULE": 0, "DEFAULT": 25, "ERROR": 0, "STRUCTURAL": 0, "LINK": 0}
     assert fw["quarantine"]["written"] == 25
     assert fw["quarantine"]["streams"]["quarantine"] == "DEFAULT__EAGLEGATE__QUARANTINE__EAGLEGATE_INT"
 
@@ -298,7 +298,9 @@ def test_screen_only_shows_items_that_exist(packets):
     config, _ = packets
     defined = config.telemetry["EAGLEGATE"]
     with open(os.path.join(ROOT, "targets", "EAGLEGATE", "screens", "firewall.txt")) as f:
-        widgets = [line.split() for line in f if line.strip().startswith("LABELVALUE")]
+        # COSMOS renders the screen with ERB; target_name is the installed target's name
+        text = f.read().replace("<%= target_name %>", "EAGLEGATE")
+        widgets = [line.split() for line in text.splitlines() if line.strip().startswith("LABELVALUE")]
     assert widgets
     for _, target, packet, item, *_ in widgets:
         assert target == "EAGLEGATE" and item in defined[packet].items, item
@@ -405,7 +407,7 @@ def test_untrusted_bytes_are_not_decoded_as_a_header(valkey):
 def test_evaluation_error_is_quarantined_as_a_whole_releasable_packet(valkey):
     iface, proto, _ = build([hk_status() + status_3()])
 
-    def broken(packet):
+    def broken(packet, **kwargs):
         raise RuntimeError("boom")
 
     proto.ruleset.evaluate = broken

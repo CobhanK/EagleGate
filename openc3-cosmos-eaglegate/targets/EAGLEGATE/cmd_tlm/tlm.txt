@@ -40,13 +40,17 @@ TELEMETRY EAGLEGATE FIREWALL_STATUS BIG_ENDIAN "Firewall rejection counts and th
   APPEND_ITEM    QUARANTINED          32 UINT    "Rejections stored in the quarantine streams"
   APPEND_ITEM    QUARANTINE_ERRORS    32 UINT    "Rejections that could not be stored"
     LIMITS DEFAULT 1 ENABLED -2 -1 0.5 1
-  APPEND_ITEM    CONNECTION_UNTRUSTED  8 UINT    "First packet was rejected: all telemetry discarded until reconnect"
+  APPEND_ITEM    CONNECTION_UNTRUSTED  8 UINT    "First packet (or frame) was rejected: all telemetry discarded until reconnect or an admin restores trust"
     STATE FALSE 0 GREEN
     STATE TRUE 1 RED
   APPEND_ITEM    RULES_VERSION        32 INT     "Active rules version (-1 = deny all, no valid rules loaded)"
   APPEND_ITEM    LAST_TIME           256 STRING  "UTC time of the last rejection"
-  APPEND_ITEM    LAST_STAGE           96 STRING  "RULE, DEFAULT, ERROR, STRUCTURAL or UNTRUSTED"
+  APPEND_ITEM    LAST_STAGE           96 STRING  "RULE, DEFAULT, ERROR, STRUCTURAL, UNTRUSTED or LINK"
   APPEND_ITEM    LAST_RULE_ID        512 STRING  "Rule that rejected the last packet (RULE stage)"
   APPEND_ITEM    LAST_APID            64 STRING  "APID of the last rejected packet, if it had a header"
   APPEND_ITEM    LAST_REASON        2048 STRING  "Why the last packet was rejected"
   APPEND_ITEM    LAST_ENTRY_ID       256 STRING  "Quarantine stream entry of the last rejection (empty if not stored)"
+  # Added for extensions (eaglegate_extensions.py) and admin actions; appended so
+  # the items above keep their positions
+  APPEND_ITEM    DENIED_LINK          32 UINT    "Rejected by an extension below the packet layer (e.g. an SDLS frame check)"
+  APPEND_ITEM    TRUST_RESTORES       32 UINT    "Times an admin restored trust in an untrusted connection"

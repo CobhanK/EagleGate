@@ -1,0 +1,40 @@
+# LANGUAGE python
+# EagleGate SDLS: checks SDLS-protected CCSDS TM transfer frames, then hands the
+# packets inside to the EagleGate firewall.
+# REQUIRES the openc3-cosmos-eaglegate plugin (the firewall): install it FIRST,
+# with a matching version (both refuse to run with an incompatible partner).
+
+VARIABLE sdls_target_name EAGLEGATE_SDLS
+# The core plugin's target. Mapping it puts the firewall's code on this
+# interface's Python path; it is DISABLED so it never identifies packets or
+# routes commands. Change it if you renamed the core target at install time.
+VARIABLE core_target_name EAGLEGATE
+# Where the frames come from (UDP). For NOS3, run the radio simulator with
+# TCP_GROUND=0 and point its "gsw" (or, for a shadow copy, "gsw2") connection here.
+VARIABLE frame_host radio-sim
+VARIABLE frame_port 8011
+# enforce: packets that pass go on to COSMOS
+# monitor: check, count and quarantine only; pass nothing (a shadow of the real link)
+VARIABLE mode enforce
+# Largest packet the firewall accepts (bytes); also bounds packet reassembly
+VARIABLE fw_max_length 1024
+# Targets whose packets arrive inside the frames, space separated (e.g. the
+# mission's or NOS3's targets). UNKNOWN maps nothing.
+VARIABLE packet_targets UNKNOWN
+
+TARGET EAGLEGATE_SDLS <%= sdls_target_name %>
+
+# A UDP or TCP client interface. NOT a TCP server interface: COSMOS gives each
+# TCP client its own copy of the protocols, which rule changes and admin
+# commands cannot reach (the firewall reports this as interface_warning).
+INTERFACE <%= sdls_target_name %>_INT openc3/interfaces/udp_interface.py <%= frame_host %> None <%= frame_port %>
+  MAP_TARGET <%= sdls_target_name %>
+<% packet_targets.split.each do |target| %>
+  MAP_TARGET <%= target %>
+<% end %>
+  MAP_TLM_TARGET <%= core_target_name %> DISABLED
+  # Frames in, packets out: the SDLS frame protocol must come FIRST
+  PROTOCOL READ eaglegate_sdls_frame_protocol.py <%= mode %> <%= sdls_target_name %>
+  PROTOCOL READ eaglegate_firewall_protocol.py <%= fw_max_length %> <%= sdls_target_name %>/rules/firewall_rules.json
+  # Sign the applied rules (and with them the link section); see the core plugin's plugin.txt
+  # SECRET ENV EAGLEGATE_RULES_KEY EAGLEGATE_RULES_KEY

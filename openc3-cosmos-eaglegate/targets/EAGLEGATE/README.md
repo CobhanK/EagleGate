@@ -101,7 +101,15 @@ Text the spacecraft sends ends up in CSV exports, terminals, logs, scripts and d
 4. The result is a **`Verdict`**: ALLOW or DENY, the stage that decided, and a readable reason such as "INT16 at offset 12 = 120, allowed -40..85".
 5. On ALLOW, the packet goes on to COSMOS. On DENY, `_reject()` counts it, logs it, writes it to quarantine and flags a status update.
 
-**First-packet rule.** If the first packet of a connection is rejected, the connection is treated as untrusted. Everything after it is discarded until the interface reconnects. The first 4 KB is kept as evidence. A rejection after an allowed first packet only affects that one packet.
+**First-packet rule.** If the first packet of a connection is rejected, the connection is treated as untrusted. Everything after it is discarded until the interface reconnects, or until an admin restores trust. The first 4 KB is kept as evidence. A rejection after an allowed first packet only affects that one packet.
+
+- **Turning it off:** set `"settings": {"untrust_on_first_packet_reject": false}` in the rules file. The rules page shows it as a switch. Turn it off behind an extension that already checks the sender (such as the SDLS frame layer), where one unexpected APID would otherwise cut the whole link.
+- **Restore trust:** an admin presses **Restore trust…** on the rules page and gives a reason. The connection keeps its socket and the firewall judges each packet again. This matters for senders that never reconnect on their own, such as the NOS3 radio simulator. How it stays admin-only:
+  1. The page writes `requests/restore_trust.json` to the admin-only bucket path.
+  2. It sends `RESTORE_TRUST <sha256 of that file>`.
+  3. The firewall acts only on a matching file that is recent (10 minutes) and whose nonce is new. It then deletes the file and writes an audit entry (`lib/eaglegate_admin_requests.py`).
+
+  An operator with only the `system_set` permission can send the command but cannot upload the file.
 
 ### Fail-closed behaviours
 
@@ -204,12 +212,13 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
 
 - **`QuarantineWriter`** writes to two capped Valkey streams per interface:
   - `…QUARANTINE__<iface>` holds whole packets denied by RULE, DEFAULT or ERROR. These are the "framed" stages, and the only ones that could ever be released back into COSMOS.
-  - `…QUARANTINE_RAW__<iface>` holds STRUCTURAL and UNTRUSTED bytes. It is for forensics only and is never releasable. It is separate so a flood of garbage cannot push real rule denials out.
+  - `…QUARANTINE_RAW__<iface>` holds STRUCTURAL and UNTRUSTED bytes, plus LINK rejections from an extension (for example a whole transfer frame, with the layer that refused it and the link values such as the virtual channel). It is for forensics only and is never releasable. It is separate so a flood of garbage cannot push real rule denials out.
+  - `…QUARANTINE_AUDIT__<iface>` records admin actions: Restore trust, and extension actions such as resetting replay counters. Each entry has who asked (as the page reported it), why, the request's sha256 and nonce, and the outcome, including refusals.
   - Each entry is self-contained: it copies the rule description, version and sha256, because the rules file may change later.
   - A storage failure never changes the firewall's decision. It is counted, and writes pause for 30 seconds.
 - **`StatusPublisher`** injects the `FIREWALL_STATUS` telemetry packet. It carries counts by stage, discarded bytes, quarantine counts, the untrusted flag, the rules version and the last rejection. It is throttled to at most one per second. It contains no packet bytes, so it is safe for operator screens.
 - `interface_details("EAGLEGATE_INT")` also shows the rule hit counts, where the rules came from, the load and save errors, and the last 20 rejection reasons.
-- **Not built yet:** the review and release tool. The names `QUARANTINE_REVIEW` and `QUARANTINE_AUDIT` are reserved in `stream_names()`. Stream contents are admin-only.
+- **Not built yet:** the review and release tool. The name `QUARANTINE_REVIEW` is reserved in `stream_names()`. Stream contents are admin-only.
 
 ## 7. Key classes and objects
 
@@ -221,7 +230,9 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
 | `Rule`, `MatchRule` | `lib/eaglegate_rule.py` | Base class with `fires()` and `record()`, plus the plain allow/deny rule |
 | `RangeRule`, `SequenceRule`, `RateRule`, `AuthenticityRule` | `lib/eaglegate_rule_types.py` | The four check rules. Each documents its `params` in its docstring |
 | `Match` | `lib/eaglegate_match.py` | The "does this rule apply?" conditions, with parsing and a readable `summary` |
-| `Verdict` | `lib/eaglegate_verdict.py` | Frozen decision record. The `stage` is RULE, DEFAULT, ERROR, STRUCTURAL or UNTRUSTED |
+| `Verdict` | `lib/eaglegate_verdict.py` | Frozen decision record. The `stage` is RULE, DEFAULT, ERROR, STRUCTURAL, UNTRUSTED or LINK (an extension; `layer` says which part of it) |
+| `Extension`, `collect_extensions()` | `lib/eaglegate_extensions.py` | How another plugin's protocol in front of the firewall adds a rules section and link match keys (section 9) |
+| `parse_request()`, `NonceLog` | `lib/eaglegate_admin_requests.py` | Checks admin request files for RESTORE_TRUST and extension commands |
 | `parse_rules()`, `rules_schema()` | `lib/eaglegate_rules_parser.py` | JSON text to `Ruleset` with strict validation. `RULE_TYPES` is the registry of rule types. `rules_schema()` describes the format for the tool page |
 | `RulesStore` | `lib/eaglegate_rules_store.py` | Reads the pending, active and original rules; saves active and history. Never raises on writes |
 | `QuarantineWriter`, `StatusPublisher` | `lib/eaglegate_quarantine.py` | Valkey stream storage and the `FIREWALL_STATUS` packet |
@@ -238,3 +249,35 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
 
   Or do everything in the `openc3-node` container (plugin-root README.md). Delete a `node_modules/` installed on macOS first, because it holds macOS-only binaries. `pnpm lint` and `pnpm test` check the page.
 - **Leftover you may trip over:** `cmd_tlm/cmd.txt` is still the template `EXAMPLE` command.
+
+## 9. Extensions: plugins in front of the firewall
+
+The firewall only understands CCSDS space packets. **An extension is a COSMOS protocol from another plugin, placed BEFORE the firewall protocol on the same interface.** It turns what arrives (for example SDLS-protected transfer frames) into packets. The first one is `openc3-cosmos-eaglegate-sdls`, in the sibling folder.
+
+```
+INTERFACE ..._INT ...
+  MAP_TLM_TARGET EAGLEGATE DISABLED   # puts this plugin's lib/ on the Python path, nothing else
+  PROTOCOL READ <extension protocol> ...
+  PROTOCOL READ eaglegate_firewall_protocol.py 1024 <TARGET>/rules/firewall_rules.json
+```
+
+**What an extension gets** (contract in `lib/eaglegate_extensions.py`, version `FIREWALL_API_VERSION`):
+
+- **A section of the rules file.** Its protocol returns an `Extension` from `eaglegate_extension()`. The firewall finds it each time rules load, by looking at the protocols before it on the interface.
+  - The section is parsed by the extension, and stored in `ruleset.extensions[section]`.
+  - It is applied, versioned, diffed and signed together with the rules: one `RELOAD_RULES` changes both layers at once.
+  - A file that uses a section no protocol on the interface provides is refused.
+- **Link match keys.** Rules can say `"match": {"link": {"vcid": [4]}}`. The extension attaches the values to each packet in COSMOS's `extra` dict (`with_link()`). A packet without link values never matches a link condition.
+- **The firewall's Extension API methods** (`eaglegate_firewall_protocol.py`):
+  - `reject()`: rejections share one set of counters, one quarantine and one `FIREWALL_STATUS`.
+  - `mark_untrusted()` and `discard_untrusted()`: one untrusted state for the whole interface.
+  - `admin_request()` and `record_admin_action()`: the extension's own admin-only commands.
+
+**Why `MAP_TLM_TARGET … DISABLED`:** COSMOS puts the `lib/` folder of every target an interface maps on that interface's Python path, which is how the extension imports the firewall. A disabled telemetry mapping does only that. It never routes commands to the interface, and it never identifies packets as this plugin's demo packets (APIDs 2 and 3).
+
+**Interface types:** the interface must be UDP or a TCP **client**. COSMOS's TCP server interface gives every client its own copy of the protocols, which RELOAD_RULES, RESTORE_TRUST and `interface_details` cannot reach. The firewall detects this and reports it as `interface_warning`.
+
+**Compatibility:** an extension states which API versions it supports. If it doesn't support this plugin's version, the rules don't load and the firewall denies everything, with the reason in `interface_details`. COSMOS can't make one plugin depend on another, so install this core plugin first.
+
+**On the rules page:** pick the interface at the top. The page lists every interface whose config has the firewall protocol, and each has its own rules. The extension's section appears as a form built from the schema the interface reports. Link conditions appear in the rule editor.
+

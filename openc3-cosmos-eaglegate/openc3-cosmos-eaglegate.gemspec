@@ -26,7 +26,9 @@ Gem::Specification.new do |s|
   else
     'requirements.txt'
   end
-  s.files = Dir.glob("{targets,lib,public,tools,microservices}/**/*") + %w(Rakefile README.md LICENSE.md plugin.txt) + [python_dep_file]
+  # Python caches from running the tests are not part of the plugin
+  s.files = Dir.glob("{targets,lib,public,tools,microservices}/**/*").reject { |f| f.include?('__pycache__') } +
+    %w(Rakefile README.md LICENSE.md plugin.txt) + [python_dep_file]
 
   s.metadata = {
     # These fields are used when you submit your plugin to the OpenC3 Store at store.openc3.com

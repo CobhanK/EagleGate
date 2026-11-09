@@ -113,6 +113,43 @@ function checkValue(spec, value, where, errors) {
         checkObject(spec.fields, item, `${where}[${i}]`, errors),
       )
       return
+    case 'enum_list':
+      if (!Array.isArray(value) || value.length === 0)
+        return errors.push(`${where} must be a non-empty list`)
+      value.forEach((v, i) =>
+        checkValue({ ...spec, type: 'enum' }, v, `${where}[${i}]`, errors),
+      )
+      return
+    case 'object':
+      checkObject(spec.fields || {}, value, where, errors)
+      return
+    case 'map': {
+      if (value === null || typeof value !== 'object' || Array.isArray(value))
+        return errors.push(`${where} must be an object`)
+      for (const [key, item] of Object.entries(value)) {
+        checkValue(
+          spec.key || { type: 'string' },
+          key,
+          `${where} key '${key}'`,
+          errors,
+        )
+        checkValue(spec.value, item, `${where}.${key}`, errors)
+      }
+      return
+    }
+    case 'link_match': {
+      const keys = spec.keys || {}
+      if (!Object.keys(keys).length)
+        return errors.push(
+          `${where}: no extension on this interface provides link information`,
+        )
+      if (value === null || typeof value !== 'object' || Array.isArray(value))
+        return errors.push(`${where} must be an object`)
+      if (!Object.keys(value).length)
+        return errors.push(`${where} must be a non-empty object`)
+      checkObject(keys, value, where, errors)
+      return
+    }
     case 'byte_checks':
       if (!Array.isArray(value) || value.length === 0)
         return errors.push(`${where} must be a non-empty list`)
@@ -157,6 +194,12 @@ function enabled(rule) {
 // parser's checks). An empty list does not guarantee acceptance.
 export function validate(doc, schema) {
   const errors = []
+  if (doc.settings !== undefined)
+    checkObject(schema.settings || {}, doc.settings, 'settings', errors)
+  for (const [section, extension] of Object.entries(schema.extensions || {})) {
+    if (doc[section] !== undefined && extension.schema?.type)
+      checkValue(extension.schema, doc[section], section, errors)
+  }
   const allowedTop = new Set(schema.top_level_keys)
   for (const key of Object.keys(doc)) {
     if (!allowedTop.has(key)) errors.push(`top level has unknown key '${key}'`)
@@ -384,6 +427,47 @@ export function warnings(doc, schema, running) {
       `version ${doc.version} is not above the running version ${running.version}; it will be raised on apply`,
     )
   return result
+}
+
+// ---- extensions ----------------------------------------------------------------
+
+// The schema for one interface: the static core schema plus what the
+// extensions running on that interface add (interface_details firewall.extensions,
+// see eaglegate_extensions.py): their rules sections and the keys of match.link.
+export function withExtensions(schema, extensions) {
+  const result = clone(schema)
+  const linkKeys = {}
+  for (const extension of Object.values(extensions || {}))
+    Object.assign(linkKeys, extension.link_keys || {})
+  result.extensions = clone(extensions || {})
+  result.top_level_keys = [
+    ...schema.top_level_keys,
+    ...Object.keys(extensions || {}),
+  ]
+  result.match.keys.link = { ...schema.match.keys.link, keys: linkKeys }
+  return result
+}
+
+// A setting's value as the firewall will use it (the file may leave it out)
+export function settingValue(doc, schema, key) {
+  const value = doc.settings?.[key]
+  return value === undefined ? schema.settings[key].default : value
+}
+
+// Write a setting, leaving defaults out of the file so diffs stay small
+export function setSetting(doc, schema, key, value) {
+  const settings = { ...(doc.settings || {}) }
+  if (value === schema.settings[key].default) delete settings[key]
+  else settings[key] = value
+  if (Object.keys(settings).length) doc.settings = settings
+  else delete doc.settings
+}
+
+// "link vcid 4, 5; protection auth" for the rules table
+export function linkSummary(link) {
+  return Object.entries(link || {})
+    .map(([key, values]) => `link ${key} ${[].concat(values).join(', ')}`)
+    .join('; ')
 }
 
 // ---- editing helpers ---------------------------------------------------------

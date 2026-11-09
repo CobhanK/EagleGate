@@ -1,0 +1,66 @@
+# Published by the firewall protocol inside COSMOS (eaglegate_quarantine.py), never
+# received. Its ID is CCSDS version 7: the firewall's hardcoded structural check
+# rejects every received packet whose version is not 0, so nothing arriving on the
+# link can ever be identified as this packet. Item names and string sizes must
+# match STATUS_STRING_CHARS and status_items() in the protocol.
+TELEMETRY EAGLEGATE_SDLS FIREWALL_STATUS BIG_ENDIAN "Firewall rejection counts and the last rejection reason"
+  APPEND_ID_ITEM CCSDS_VERSION         3 UINT 7  "Always 7, so received packets can never match"
+  APPEND_ITEM    SPARE                 5 UINT    "Unused"
+  APPEND_ITEM    REJECTED             32 UINT    "Packets rejected since the interface started"
+  APPEND_ITEM    DENIED_RULE          32 UINT    "Rejected by a rule in the rules file"
+  APPEND_ITEM    DENIED_DEFAULT       32 UINT    "Rejected because no rule fired (default action)"
+  APPEND_ITEM    DENIED_ERROR         32 UINT    "Rejected because evaluating the rules failed"
+  APPEND_ITEM    DENIED_STRUCTURAL    32 UINT    "Rejected by the hardcoded header check"
+  APPEND_ITEM    DISCARDED_BYTES      32 UINT    "Bytes dropped without framing (bad headers, untrusted connections)"
+  APPEND_ITEM    QUARANTINED          32 UINT    "Rejections stored in the quarantine streams"
+  APPEND_ITEM    QUARANTINE_ERRORS    32 UINT    "Rejections that could not be stored"
+    LIMITS DEFAULT 1 ENABLED -2 -1 0.5 1
+  APPEND_ITEM    CONNECTION_UNTRUSTED  8 UINT    "First packet (or frame) was rejected: all telemetry discarded until reconnect or an admin restores trust"
+    STATE FALSE 0 GREEN
+    STATE TRUE 1 RED
+  APPEND_ITEM    RULES_VERSION        32 INT     "Active rules version (-1 = deny all, no valid rules loaded)"
+  APPEND_ITEM    LAST_TIME           256 STRING  "UTC time of the last rejection"
+  APPEND_ITEM    LAST_STAGE           96 STRING  "RULE, DEFAULT, ERROR, STRUCTURAL, UNTRUSTED or LINK"
+  APPEND_ITEM    LAST_RULE_ID        512 STRING  "Rule that rejected the last packet (RULE stage)"
+  APPEND_ITEM    LAST_APID            64 STRING  "APID of the last rejected packet, if it had a header"
+  APPEND_ITEM    LAST_REASON        2048 STRING  "Why the last packet was rejected"
+  APPEND_ITEM    LAST_ENTRY_ID       256 STRING  "Quarantine stream entry of the last rejection (empty if not stored)"
+  # Added for extensions (eaglegate_extensions.py) and admin actions; appended so
+  # the items above keep their positions
+  APPEND_ITEM    DENIED_LINK          32 UINT    "Rejected by an extension below the packet layer (e.g. an SDLS frame check)"
+  APPEND_ITEM    TRUST_RESTORES       32 UINT    "Times an admin restored trust in an untrusted connection"
+
+# Published by the SDLS frame protocol (eaglegate_sdls_status.py), never received.
+# Its ID is CCSDS version 6, which the firewall's structural check rejects on
+# every received packet (FIREWALL_STATUS uses 7). Item names and string sizes
+# must match status_items() and STRING_CHARS; a test compares them.
+TELEMETRY EAGLEGATE_SDLS LINK_STATUS BIG_ENDIAN "SDLS frame counts and the last frame rejection"
+  APPEND_ID_ITEM CCSDS_VERSION        3 UINT 6  "Always 6, so received packets can never match"
+  APPEND_ITEM    SPARE                5 UINT    "Unused"
+  APPEND_ITEM    FRAMES              32 UINT    "Transfer frames received"
+  APPEND_ITEM    FRAMES_ACCEPTED     32 UINT    "Frames that passed every check"
+  APPEND_ITEM    FRAMES_REJECTED     32 UINT    "Frames rejected (see FIREWALL_STATUS and the quarantine)"
+  APPEND_ITEM    SKIPPED_BYTES       32 UINT    "Bytes that were not part of a frame (no sync marker)"
+  APPEND_ITEM    SYNC_LOSSES         32 UINT    "Times frame sync was lost"
+  APPEND_ITEM    FECF_ERRORS         32 UINT    "Frames whose CRC did not match (corrupted)"
+  APPEND_ITEM    VC_COUNT_GAPS       32 UINT    "Virtual channel frame count jumps (lost, injected or repeated frames)"
+  APPEND_ITEM    MC_COUNT_GAPS       32 UINT    "Master channel frame count jumps"
+  APPEND_ITEM    REPLAY_REJECTIONS   32 UINT    "Frames whose anti-replay counter did not go up"
+    LIMITS DEFAULT 1 ENABLED -2 -1 0.5 1
+  APPEND_ITEM    UNVERIFIED_FRAMES   32 UINT    "Frames of authenticated SAs whose MAC was not checked (no crypto backend)"
+  APPEND_ITEM    UNREADABLE_FRAMES   32 UINT    "Frames of encrypting SAs that could not be decrypted (no crypto backend)"
+  APPEND_ITEM    PACKETS_OUT         32 UINT    "Packets passed on to the firewall"
+  APPEND_ITEM    REASSEMBLY_DROPS    32 UINT    "Packet pieces dropped (lost frames, inconsistent lengths)"
+  APPEND_ITEM    IDLE_PACKETS        32 UINT    "Idle packets (APID 0x7FF) dropped"
+  APPEND_ITEM    OID_FRAMES          32 UINT    "Frames holding only idle data"
+  APPEND_ITEM    REPLAY_RESETS       32 UINT    "Times an admin reset an anti-replay counter"
+  APPEND_ITEM    MODE                64 STRING  "enforce or monitor"
+  APPEND_ITEM    CRYPTO_BACKEND     128 STRING  "Who verifies and decrypts frames (none until Phase 2)"
+  APPEND_ITEM    WOULD_UNTRUST        8 UINT    "Monitor mode: an enforcing interface would have distrusted this connection"
+    STATE FALSE 0 GREEN
+    STATE TRUE 1 YELLOW
+  APPEND_ITEM    LAST_TIME          256 STRING  "UTC time of the last frame rejection"
+  APPEND_ITEM    LAST_VCID           16 INT     "Virtual channel of the last rejected frame (-1 = unknown)"
+  APPEND_ITEM    LAST_SPI            32 INT     "SPI of the last rejected frame (-1 = unknown)"
+  APPEND_ITEM    LAST_LAYER          96 STRING  "frame, sdls or reassembly"
+  APPEND_ITEM    LAST_REASON       2048 STRING  "Why the last frame (or packet piece) was rejected"

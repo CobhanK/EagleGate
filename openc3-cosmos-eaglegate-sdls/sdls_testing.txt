@@ -1,0 +1,37 @@
+EagleGate SDLS - new features to test live (COSMOS + NOS3)
+==========================================================
+
+Setup
+-----
+- Install the core plugin first, then the SDLS plugin. Both should install without errors.
+- Install with MAP_TLM_TARGET <core> DISABLED and confirm nothing breaks.
+- Run the NOS3 radio sim over UDP (TCP_GROUND=0); frames arrive on EAGLEGATE_SDLS_INT.
+- Check the shipped link section against real NOS3 frames: the clear SA's 12-byte IV field
+  and the auth SA's 2-byte SN + 16-byte MAC.
+
+SDLS frame layer
+----------------
+- Monitor mode: frames are counted and LINK_STATUS updates, but no packets reach COSMOS.
+- Enforce mode: NOS3 packets come out with link values (vcid, spi, protection) and are identified.
+- Packets that span frames are reassembled correctly.
+- Idle packets and idle-only frames are dropped quietly.
+- Wrong SCID, wrong VCID or wrong SPI on a VC (e.g. clear SPI 5 on auth VC 5) is rejected and
+  quarantined (stage LINK).
+- Rejected first frame -> connection untrusted. The untrust_on_first_frame_reject toggle turns this off.
+- Replayed frame is rejected; anti-replay counters survive a COSMOS restart.
+- Lost frame (VC count gap) -> warning plus a reassembly drop; packets resume afterwards.
+- Encrypted VC 4 frames are rejected (or counted only, with encrypted_without_backend=drop).
+- Garbage bytes between frames are skipped and quarantined; sync is regained.
+- RESET_REPLAY via the admin request: relearn, floor, "all", and refusals (no request, bad SPI).
+- LINK_STATUS and FIREWALL_STATUS values (incl. DENIED_LINK) match what happened; screens render.
+
+Core plugin (new)
+-----------------
+- Rules page: interface selector lists EAGLEGATE_INT and EAGLEGATE_SDLS_INT, each with its own rules.
+- Rules page: the "link" section form edits, validates, diffs and applies with RELOAD_RULES.
+- Link conditions in the rule editor (e.g. deny protection "clear").
+- Settings switch untrust_on_first_packet_reject.
+- Restore trust button: resumes an untrusted connection without reconnecting; audit entry written.
+- Restore trust / RESET_REPLAY refused for non-admins (Enterprise), expired or reused requests.
+- interface_warning appears if a TCP server interface is used.
+- Rules signing still works with a link section present.
