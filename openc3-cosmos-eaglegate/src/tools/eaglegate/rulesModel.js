@@ -562,3 +562,44 @@ export function lineDiff(before, after) {
   while (j < b.length) out.push({ op: '+', line: b[j++] })
   return out
 }
+
+// The diff rows to show: changed lines with `context` unchanged lines around
+// them; longer unchanged runs become one { op: '…', line: 'N unchanged lines' }
+export function compactDiff(rows, context = 3) {
+  const keep = rows.map(() => false)
+  rows.forEach((row, i) => {
+    if (row.op === ' ') return
+    for (
+      let k = Math.max(0, i - context);
+      k <= Math.min(rows.length - 1, i + context);
+      k++
+    )
+      keep[k] = true
+  })
+  const out = []
+  let skipped = 0
+  const flush = () => {
+    if (skipped)
+      out.push({
+        op: '…',
+        line: `${skipped} unchanged line${skipped === 1 ? '' : 's'}`,
+      })
+    skipped = 0
+  }
+  rows.forEach((row, i) => {
+    if (keep[i]) {
+      flush()
+      out.push(row)
+    } else skipped++
+  })
+  flush()
+  return out
+}
+
+// { added, removed } line counts of a diff
+export function diffStats(rows) {
+  return {
+    added: rows.filter((r) => r.op === '+').length,
+    removed: rows.filter((r) => r.op === '-').length,
+  }
+}

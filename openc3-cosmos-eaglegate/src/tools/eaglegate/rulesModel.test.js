@@ -9,6 +9,8 @@ import { test } from 'node:test'
 import {
   clone,
   fromInput,
+  compactDiff,
+  diffStats,
   lineDiff,
   linkSummary,
   mayOverlap,
@@ -313,3 +315,23 @@ test(
     assert.deepEqual(validate(broken, sdlsSchema), [])
   },
 )
+
+test('compact diff keeps changes with context and folds unchanged runs', () => {
+  const before = Array.from({ length: 20 }, (_, i) => `line ${i}`)
+  const after = [...before]
+  after[10] = 'changed'
+  const rows = lineDiff(before.join('\n'), after.join('\n'))
+  const compact = compactDiff(rows, 2)
+  assert.deepEqual(compact[0], { op: '…', line: '8 unchanged lines' })
+  assert.deepEqual(
+    compact.slice(1, -1).map((r) => r.op),
+    [' ', ' ', '-', '+', ' ', ' '],
+  )
+  assert.deepEqual(compact.at(-1), { op: '…', line: '7 unchanged lines' })
+  assert.deepEqual(diffStats(rows), { added: 1, removed: 1 })
+  // Nothing changed: one folded run; a one-line run says "line"
+  assert.deepEqual(compactDiff(lineDiff('a', 'a')), [
+    { op: '…', line: '1 unchanged line' },
+  ])
+  assert.deepEqual(compactDiff([]), [])
+})

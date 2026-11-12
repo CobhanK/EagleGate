@@ -487,12 +487,29 @@
     />
 
     <!-- Review: what changes, then apply -->
+    <!-- The card is capped at the window height and only the diff scrolls, so
+         the Apply button is always on screen however long the rules are -->
     <v-dialog v-model="reviewing" max-width="1000" scrollable>
-      <v-card>
-        <v-card-title
-          >Apply version {{ toApply && toApply.doc.version }}?</v-card-title
-        >
-        <v-card-text>
+      <v-card class="review-card">
+        <v-card-title class="d-flex align-center flex-wrap">
+          Apply version {{ toApply && toApply.doc.version }}?
+          <v-spacer />
+          <span class="text-body-2">
+            <span class="text-success">+{{ diffCounts.added }}</span>
+            <span class="text-error ml-2">−{{ diffCounts.removed }}</span>
+            lines
+          </span>
+          <v-switch
+            v-model="fullDiff"
+            label="Whole file"
+            density="compact"
+            hide-details
+            color="primary"
+            class="ml-4 flex-grow-0"
+          />
+        </v-card-title>
+        <v-divider />
+        <v-card-text class="review-body">
           <v-alert
             v-if="warningList.length"
             type="warning"
@@ -505,12 +522,13 @@
             </div>
           </v-alert>
           <pre class="diff"><span
-            v-for="(row, i) in diffRows"
+            v-for="(row, i) in shownDiffRows"
             :key="i"
-            :class="{ added: row.op === '+', removed: row.op === '-' }"
+            :class="{ added: row.op === '+', removed: row.op === '-', folded: row.op === '…' }"
           >{{ row.op }} {{ row.line }}
 </span></pre>
         </v-card-text>
+        <v-divider />
         <v-card-actions>
           <v-spacer />
           <v-btn variant="text" :disabled="applying" @click="reviewing = false"
@@ -610,6 +628,8 @@ import SchemaField from './SchemaField.vue'
 import { reasonProblem } from './adminRequest.js'
 import {
   clone,
+  compactDiff,
+  diffStats,
   lineDiff,
   linkSummary,
   newRule,
@@ -674,6 +694,7 @@ export default {
       history: { open: false, items: [] },
       trust: { open: false, reason: '', busy: false },
       tab: 'rules',
+      fullDiff: false, // review dialog: whole file instead of only the changes
     }
   },
   computed: {
@@ -769,6 +790,13 @@ export default {
     },
     diffRows() {
       return this.toApply ? lineDiff(this.runningNormal, this.toApply.text) : []
+    },
+    // Only the changes (with context) unless "Whole file" is on
+    shownDiffRows() {
+      return this.fullDiff ? this.diffRows : compactDiff(this.diffRows)
+    },
+    diffCounts() {
+      return diffStats(this.diffRows)
     },
   },
   async created() {
@@ -1032,6 +1060,7 @@ export default {
     review() {
       const doc = withBumpedVersion(this.doc, this.state.rules.version)
       this.toApply = { doc, text: toFileText(doc) }
+      this.fullDiff = false
       this.reviewing = true
     },
     async apply() {
@@ -1109,6 +1138,20 @@ export default {
 </script>
 
 <style scoped>
+.review-card {
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+.review-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.diff .folded {
+  opacity: 0.6;
+  font-style: italic;
+}
 .diff {
   font-size: 0.85em;
   white-space: pre-wrap;
