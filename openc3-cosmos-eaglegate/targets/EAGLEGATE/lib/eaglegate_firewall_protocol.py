@@ -36,6 +36,10 @@ Where rejected packets go (eaglegate_quarantine.py):
     telemetry packet (at most once a second) for operator screens
   * the last few reasons are also in interface_details("EAGLEGATE_INT")
 
+Every packet judged, allowed or not, is also counted per APID
+(eaglegate_traffic.py): totals, bytes and sequence gaps, shown in
+FIREWALL_STATUS and the page's Link status tab.
+
 How the rules get loaded (eaglegate_rules_store.py has the storage keys and
 why they are admin-only):
 
@@ -86,6 +90,7 @@ from eaglegate_rules_parser import TOP_LEVEL_KEYS, parse_rules
 from eaglegate_rules_signing import RulesSigner
 from eaglegate_rules_store import RulesStore
 from eaglegate_ruleset import Ruleset
+from eaglegate_traffic import TrafficCounter
 from eaglegate_verdict import DEFAULT, ERROR, LINK, RULE, STRUCTURAL, UNTRUSTED, Verdict
 from openc3.environment import OPENC3_SCOPE
 from openc3.interfaces.protocols.length_protocol import LengthProtocol
@@ -138,6 +143,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.rejected = 0
         self.rejected_by_stage = {RULE: 0, DEFAULT: 0, ERROR: 0, STRUCTURAL: 0, LINK: 0}
         self.discarded_bytes = 0
+        self.traffic = TrafficCounter()    # every judged packet, allowed or not
         self.first_packet_decided = False  # has this connection's first packet been judged?
         self.connection_untrusted = False  # first packet was rejected: deny all until reconnect
         self.untrusted_since = None
@@ -185,8 +191,10 @@ class EaglegateFirewallProtocol(LengthProtocol):
             except Exception as error:  # an exception here would disconnect COSMOS
                 verdict = Verdict(action="DENY", stage=ERROR, detail=f"rules engine error: {error}",
                                   rules_version=ruleset.version, rules_sha256=ruleset.sha256)
+            self.traffic.record(data, verdict.action == "ALLOW")
             if verdict.action == "ALLOW":
                 self.first_packet_decided = True
+                self.status_due = True  # PACKETS and ALLOWED changed; published at most once a second
                 return (data, extra)
             self._reject(verdict, data, link)
             data = b""  # no new bytes; just take the next buffered packet
@@ -398,6 +406,9 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "DENIED_STRUCTURAL": _u32(self.rejected_by_stage[STRUCTURAL]),
             "DENIED_LINK": _u32(self.rejected_by_stage[LINK]),
             "TRUST_RESTORES": _u32(self.trust_restores),
+            "PACKETS": _u32(self.traffic.packets),
+            "ALLOWED": _u32(self.traffic.allowed),
+            "SEQ_GAPS": _u32(self.traffic.seq_gaps),
             "DISCARDED_BYTES": _u32(self.discarded_bytes),
             "QUARANTINED": _u32(writer.written if writer else 0),
             "QUARANTINE_ERRORS": _u32((writer.errors + writer.skipped) if writer else 0),
@@ -429,6 +440,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.untrusted_cause = None
         self.untrusted_captured = 0
         self.connection_id += 1  # counts attempts; only connected ones get quarantine entries
+        self.traffic.new_connection()
         self.load_active()
         # Publish only what screens would see change, not once per retry of a dead link
         if self.status_sent_at is None or was_untrusted or self.ruleset is not old_ruleset:
@@ -587,6 +599,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "rejected": self.rejected,
             "rejected_by_stage": dict(self.rejected_by_stage),
             "discarded_bytes": self.discarded_bytes,
+            "traffic": self.traffic.describe(),
             "connection_untrusted": self.connection_untrusted,
             "untrusted_since": self.untrusted_since,
             "untrusted_cause": self.untrusted_cause,

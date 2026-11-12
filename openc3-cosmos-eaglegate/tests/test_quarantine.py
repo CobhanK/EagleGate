@@ -392,7 +392,9 @@ def test_failed_status_publish_is_retried(valkey, monkeypatch):
     clock[0] += eaglegate_quarantine.PAUSE_AFTER_ERROR
     iface.chunks = [hk_status()]  # no new rejection, but the missed update goes out
     read_all(iface)
-    assert valkey.status[-1]["REJECTED"] == 1 and not proto.status_due
+    assert valkey.status[-1]["REJECTED"] == 1 and valkey.status[-1]["PACKETS"] == 2
+    # The allowed packet itself was counted after that publish: it is owed next time
+    assert proto.status_due and proto.status_items()["ALLOWED"] == 2
 
 
 def test_untrusted_bytes_are_not_decoded_as_a_header(valkey):

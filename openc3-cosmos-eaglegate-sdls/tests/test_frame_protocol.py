@@ -12,7 +12,7 @@ from eaglegate_ccsds_header import CcsdsHeader
 from eaglegate_extensions import LINK_EXTRA_KEY
 from eaglegate_firewall_protocol import EaglegateFirewallProtocol
 from eaglegate_rules_store import rules_keys
-from eaglegate_sdls_frame_protocol import EaglegateSdlsFrameProtocol
+from eaglegate_sdls_frame_protocol import EXTENSION, RESET_REPLAY, EaglegateSdlsFrameProtocol
 from eaglegate_sdls_status import STRING_CHARS, status_items
 from eaglegate_test_support import FakeRulesStore, ScriptedInterface, admin_request
 from openc3.top_level import get_class_from_module
@@ -447,6 +447,51 @@ def test_details_are_plain_json():
     assert sdls["config"]["scid"] == 3 and sdls["frames"]["accepted"] == 1
     assert sdls["replay"]["counters"]["7"]["value"] == "1"
     assert sdls["recent"][0]["layer"] == "frame"
+
+
+def resolve(section, path):
+    for name in path.split("."):
+        section = section[name]
+    return section
+
+
+def test_every_panel_finds_its_data_in_the_details():
+    """The page's Link status tab draws EXTENSION.panels from interface_details:
+    every path, item and column must exist there."""
+    iface, _, _, _ = build(auth_vc(hk(1)).cadus() + clear_vc(hk(2)).cadus())
+    read_all(iface)
+    details = json.loads(json.dumps(iface.details(), cls=JsonEncoder))
+    section = details["read_protocols"][0][EXTENSION.details_key]
+    for panel in EXTENSION.panels:
+        data = resolve(section, panel["path"])
+        assert isinstance(data, dict) and data, panel["title"]
+        if panel["kind"] == "values":
+            assert set(panel["items"]) <= set(data), panel["title"]
+        for row in data.values() if panel["kind"] == "table" else ():
+            columns = set(row) if isinstance(row, dict) else {"value"}
+            assert set(panel["columns"]) <= columns, panel["title"]
+
+
+def test_replay_table_lists_counted_sas_before_their_first_frame():
+    """So an admin can set a floor for an SA that has not sent anything yet."""
+    iface, _, _, _ = build()
+    counters = iface.details()["read_protocols"][0]["sdls"]["replay"]["counters"]
+    assert counters["7"] == {"kind": "sn", "value": None, "floor": None, "updated": ""}
+    assert "5" not in counters  # the clear SA has no counter
+
+
+def test_reset_action_params_are_the_ones_reset_replay_accepts():
+    assert set(RESET_REPLAY["params"]) == {"spi", "floor"}
+    assert RESET_REPLAY["command"] == "RESET_REPLAY"
+
+
+def test_row_reset_from_the_page_with_an_empty_floor():
+    """The page sends the row key as text and may leave the floor field empty."""
+    iface, _, fw, store = build(auth_vc(hk(1), counter_start=40).cadus())
+    read_all(iface)
+    iface.protocol_cmd("RESET_REPLAY", upload(store, spi="7", floor=""), read_write="READ")
+    action = fw.admin_actions[-1]
+    assert action["ok"] and action["floor"] is None and "relearn" in action["detail"]
 
 
 def test_idle_only_frames_and_idle_packets_never_reach_the_firewall():

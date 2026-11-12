@@ -22,12 +22,17 @@ SDLS frame layer
 - Lost frame (VC count gap) -> warning plus a reassembly drop; packets resume afterwards.
 - Encrypted VC 4 frames are rejected (or counted only, with encrypted_without_backend=drop).
 - Garbage bytes between frames are skipped and quarantined; sync is regained.
-- RESET_REPLAY via the admin request: relearn, floor, "all", and refusals (no request, bad SPI).
+- RESET_REPLAY from the Link status tab: row Reset (relearn), with a floor, Reset all, Reset a counter
+  for an SPI with no baseline yet, and refusals (bad SPI, floor too big). Each shows under Admin actions.
 - LINK_STATUS and FIREWALL_STATUS values (incl. DENIED_LINK) match what happened; screens render.
 
 Core plugin (new)
 -----------------
 - Rules page: interface selector lists EAGLEGATE_INT and EAGLEGATE_SDLS_INT, each with its own rules.
+- Link status tab: packets/s, allowed and rejected counts, and per-APID rows match the traffic sent. Sequence gaps
+  appear when NOS3 packets are lost or blocked. The SDLS panels (frames, virtual channels, anti-replay counters)
+  update every 2 s. Action buttons are hidden for non-admins (Enterprise).
+- FIREWALL_STATUS PACKETS / ALLOWED / SEQ_GAPS update while telemetry flows (screen "Traffic" box).
 - Rules page: the "link" section form edits, validates, diffs and applies with RELOAD_RULES.
 - Link conditions in the rule editor (e.g. deny protection "clear").
 - Settings switch untrust_on_first_packet_reject.

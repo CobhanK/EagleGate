@@ -26,6 +26,10 @@ Arguments (plugin.txt): mode, then the target its LINK_STATUS packet belongs to.
             passed on and nothing is discarded as untrusted: a shadow of the
             real link, e.g. fed a copy of the frames by the NOS3 radio simulator
 
+The EagleGate Firewall page's Link status tab shows this protocol's
+interface_details section with the panels in EXTENSION, and offers RESET_REPLAY
+as an admin action (eaglegate_extensions.py, "Panels and actions").
+
 Protocol command (admin only, through an admin request like RESTORE_TRUST):
   RESET_REPLAY <request_sha256>   requests/reset_replay.json params:
       {"spi": 7 | "all", "floor": 1200 (optional)}
@@ -60,6 +64,46 @@ STATUS_INTERVAL = 1.0
 RECENT = 20
 DEFAULT_MAX_PACKET = 65542
 
+RESET_REPLAY = {
+    "name": "reset_replay",
+    "command": "RESET_REPLAY",
+    "title": "Reset anti-replay counter",
+    "help": "Forget the last accepted counter so the next frame sets a new baseline, or set a floor below which "
+            "counters are refused. Use it when the spacecraft lost its counters (e.g. a restart without saved "
+            "state): its frames are then refused as \"far below the last accepted\".",
+    "confirm": "Until the next accepted frame, a recorded old frame above the floor would be accepted once.",
+    "params": {
+        "spi": {"type": "string", "title": "SPI", "required": True, "help": "an SPI number, or all"},
+        "floor": {"type": "string", "title": "Floor",
+                  "help": "optional: refuse counters below this (decimal or 0x hex); empty = accept the next "
+                          "frame's counter as the new baseline"},
+    },
+}
+
+PANELS = (
+    {"title": "Link", "kind": "values", "path": "overview",
+     "items": {"mode": "Mode", "crypto_backend": "Crypto backend", "in_lock": "Frame sync",
+               "would_untrust": "Would untrust (monitor)"}},
+    {"title": "Frames", "kind": "values", "path": "frames",
+     "items": {"frames": "Received", "accepted": "Accepted", "rejected": "Rejected",
+               "fecf_errors": "FECF errors", "vc_count_gaps": "VC count gaps", "mc_count_gaps": "MC count gaps",
+               "replay_rejections": "Replay rejections", "unverified": "MAC not checked",
+               "unreadable": "Not decrypted", "backend_failures": "Backend failures"}},
+    {"title": "Packets from frames", "kind": "values", "path": "packets",
+     "items": {"packets_seen": "Reassembled", "packets_out": "Passed to the firewall",
+               "reassembly_drops": "Reassembly drops", "dropped_quietly": "Frames dropped (count only)",
+               "untrusted_bytes": "Untrusted bytes", "no_config_bytes": "Bytes with no link config"}},
+    {"title": "Virtual channels", "kind": "table", "path": "frame_counts", "key_title": "VCID",
+     "columns": {"value": "Last frame count"}},
+    {"title": "Anti-replay counters", "kind": "table", "path": "replay.counters", "key_title": "SPI",
+     "help": "The last accepted counter of each security association (kept in Valkey across restarts). "
+             "Empty: no baseline, the next frame sets it (or an admin floor, with replay_baseline require).",
+     "columns": {"kind": "Counter", "value": "Last accepted", "floor": "Floor", "updated": "Updated"},
+     "row_actions": [{"action": "reset_replay", "title": "Reset", "row_param": "spi"}],
+     "actions": [{"action": "reset_replay", "title": "Reset a counter"},
+                 {"action": "reset_replay", "title": "Reset all", "params": {"spi": "all"}}]},
+)
+
 EXTENSION = Extension(
     name="sdls",
     section="link",
@@ -69,6 +113,9 @@ EXTENSION = Extension(
     layers=("frame", "sdls", "reassembly"),
     api_versions=FIREWALL_API_VERSIONS,
     version=SDLS_VERSION,
+    details_key="sdls",
+    panels=PANELS,
+    actions=(RESET_REPLAY,),
 )
 
 
@@ -352,7 +399,9 @@ class EaglegateSdlsFrameProtocol(Protocol):
         if not targets:
             raise ValueError("no security association has an anti-replay counter")
         floor = params.get("floor")
-        if floor is not None:
+        if floor in ("", None):
+            floor = None  # an empty form field: relearn
+        else:
             try:
                 floor = int(str(floor), 0)
             except ValueError:
@@ -412,10 +461,12 @@ class EaglegateSdlsFrameProtocol(Protocol):
 
     def read_details(self):
         result = super().read_details()
-        result["sdls"] = {
+        result[EXTENSION.details_key] = {
             "version": SDLS_VERSION,
             "mode": self.mode,
             "firewall_error": self.firewall_error,
+            "overview": {"mode": self.mode, "crypto_backend": self.backend.name if self.backend else None,
+                         "in_lock": self.sync.in_lock if self.sync else None, "would_untrust": self.would_untrust},
             "config": self.config.summary() if self.config else None,
             "crypto": self.backend.status() if self.backend else None,
             "frames": dict(self.policy.counts),
@@ -427,7 +478,7 @@ class EaglegateSdlsFrameProtocol(Protocol):
                            "in_progress": sorted(self.reassembler.partials)} if self.reassembler else None,
             "first_frame_decided": self.first_frame_decided,
             "would_untrust": self.would_untrust,
-            "replay": {"counters": self.replay.describe(), "rejected": self.replay.rejected,
+            "replay": {"counters": self._replay_counters(), "rejected": self.replay.rejected,
                        "resets": self.replay.resets,
                        "store": self.replay.store.summary() if self.replay.store else None},
             "frame_counts": {str(vcid): count for vcid, count in sorted(self.policy.vc_counts.items())},
@@ -436,6 +487,17 @@ class EaglegateSdlsFrameProtocol(Protocol):
                               "errors": self.status.errors if self.status else 0},
         }
         return result
+
+    def _replay_counters(self):
+        """Every remembered counter, plus the configured SAs that have none yet
+        (so an admin can set a floor before their first frame)."""
+        counters = self.replay.describe()
+        firewall = self._firewall()
+        config = firewall.ruleset.extensions.get(EXTENSION.section) if firewall else None  # the running rules
+        for spi, sa in sorted(config.sas.items()) if config else ():
+            if sa.replay != "none":
+                counters.setdefault(str(spi), {"kind": sa.replay, "value": None, "floor": None, "updated": ""})
+        return dict(sorted(counters.items(), key=lambda item: int(item[0])))
 
     def _name(self):
         return self.interface.name if self.interface else "?"

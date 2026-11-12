@@ -29,6 +29,10 @@ TELEMETRY EAGLEGATE_SDLS FIREWALL_STATUS BIG_ENDIAN "Firewall rejection counts a
   # the items above keep their positions
   APPEND_ITEM    DENIED_LINK          32 UINT    "Rejected by an extension below the packet layer (e.g. an SDLS frame check)"
   APPEND_ITEM    TRUST_RESTORES       32 UINT    "Times an admin restored trust in an untrusted connection"
+  # Traffic counts (eaglegate_traffic.py): every packet judged, allowed or not
+  APPEND_ITEM    PACKETS              32 UINT    "Packets judged by the rules (allowed + rejected), since the interface started"
+  APPEND_ITEM    ALLOWED              32 UINT    "Packets allowed through to COSMOS"
+  APPEND_ITEM    SEQ_GAPS             32 UINT    "Packets whose CCSDS sequence count did not follow the previous one of their APID"
 
 # Published by the SDLS frame protocol (eaglegate_sdls_status.py), never received.
 # Its ID is CCSDS version 6, which the firewall's structural check rejects on

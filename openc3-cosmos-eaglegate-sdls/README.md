@@ -150,10 +150,16 @@ The radio simulator never reconnects on its own, so Restore trust matters here. 
   - a counter more than `max_forward_jump` ahead. Until Phase 2 checks the MAC, one forged huge counter could otherwise lock out every real frame.
 - **When it changes:** only for frames that were finally accepted.
 
-**When the spacecraft loses its counters**, every frame is refused with "possible spacecraft counter loss". An admin then resets the counter:
-1. **Today:** upload `requests/reset_replay.json` (format in the core's `eaglegate_admin_requests.py`) with `params` `{"spi": 7}`, or `{"spi": "all"}`. Add `"floor": N` to also refuse anything below N.
-2. Send `RESET_REPLAY <sha256 of that file>` to the interface.
-3. **Planned:** a Link Security page with a button for this.
+**When the spacecraft loses its counters**, every frame is refused with "possible spacecraft counter loss". An admin then resets the counter on the EagleGate Firewall page:
+1. Open the **Link status** tab and pick this interface. The **Anti-replay counters** table lists every SA that has a counter, including SAs with no baseline yet.
+2. Click **Reset** on a row, or **Reset a counter** / **Reset all**.
+3. Give a reason. Optionally give a floor, to also refuse anything below it.
+
+What the page does underneath (the same steps work by hand):
+1. It uploads `requests/reset_replay.json` (format in the core's `eaglegate_admin_requests.py`) with `params` `{"spi": 7}` or `{"spi": "all"}`, plus `"floor": N` when one was given.
+2. It sends `RESET_REPLAY <sha256 of that file>` to the interface.
+
+The tab also shows this protocol's frame counts, frame sync, packets from frames and the last frame count per virtual channel. They are declared in `PANELS` in `eaglegate_sdls_frame_protocol.py`, and a test checks that each panel finds its data.
 
 The request must be recent and is used once. Operators who can send commands but can't upload to the admin-only path can't do it. Every reset, and every refusal, goes to the audit stream.
 
@@ -184,4 +190,4 @@ From this folder, with the repository's dev venv: `../.venv/bin/python -m pytest
 - **No crypto:** MACs aren't verified (`auth_unverified`), encrypted SAs can't be read, and the anti-replay counter isn't authenticated.
 - **TM only:** no AOS or USLP. No SDLS-EP (key management) and no command (TC) side.
 - **Not tested inside a running COSMOS and NOS3 yet.** In particular, check the clear SA's IV field on real frames, and check the plugin install with `MAP_TLM_TARGET ... DISABLED`.
-- **The rules page** edits the `link` section, but there is no Link Security page yet (replay counters and the RESET_REPLAY button).
+- **The Link status tab** shows a snapshot each time it refreshes (every 2 seconds). History is in COSMOS telemetry (`LINK_STATUS`, `FIREWALL_STATUS`).

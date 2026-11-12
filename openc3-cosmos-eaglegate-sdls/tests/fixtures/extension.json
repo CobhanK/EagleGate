@@ -1,8 +1,31 @@
 {
+  "actions": [
+    {
+      "command": "RESET_REPLAY",
+      "confirm": "Until the next accepted frame, a recorded old frame above the floor would be accepted once.",
+      "help": "Forget the last accepted counter so the next frame sets a new baseline, or set a floor below which counters are refused. Use it when the spacecraft lost its counters (e.g. a restart without saved state): its frames are then refused as \"far below the last accepted\".",
+      "name": "reset_replay",
+      "params": {
+        "floor": {
+          "help": "optional: refuse counters below this (decimal or 0x hex); empty = accept the next frame's counter as the new baseline",
+          "title": "Floor",
+          "type": "string"
+        },
+        "spi": {
+          "help": "an SPI number, or all",
+          "required": true,
+          "title": "SPI",
+          "type": "string"
+        }
+      },
+      "title": "Reset anti-replay counter"
+    }
+  ],
   "api_versions": [
     1,
     1
   ],
+  "details_key": "sdls",
   "layers": [
     "frame",
     "sdls",
@@ -34,6 +57,91 @@
     }
   },
   "name": "sdls",
+  "panels": [
+    {
+      "items": {
+        "crypto_backend": "Crypto backend",
+        "in_lock": "Frame sync",
+        "mode": "Mode",
+        "would_untrust": "Would untrust (monitor)"
+      },
+      "kind": "values",
+      "path": "overview",
+      "title": "Link"
+    },
+    {
+      "items": {
+        "accepted": "Accepted",
+        "backend_failures": "Backend failures",
+        "fecf_errors": "FECF errors",
+        "frames": "Received",
+        "mc_count_gaps": "MC count gaps",
+        "rejected": "Rejected",
+        "replay_rejections": "Replay rejections",
+        "unreadable": "Not decrypted",
+        "unverified": "MAC not checked",
+        "vc_count_gaps": "VC count gaps"
+      },
+      "kind": "values",
+      "path": "frames",
+      "title": "Frames"
+    },
+    {
+      "items": {
+        "dropped_quietly": "Frames dropped (count only)",
+        "no_config_bytes": "Bytes with no link config",
+        "packets_out": "Passed to the firewall",
+        "packets_seen": "Reassembled",
+        "reassembly_drops": "Reassembly drops",
+        "untrusted_bytes": "Untrusted bytes"
+      },
+      "kind": "values",
+      "path": "packets",
+      "title": "Packets from frames"
+    },
+    {
+      "columns": {
+        "value": "Last frame count"
+      },
+      "key_title": "VCID",
+      "kind": "table",
+      "path": "frame_counts",
+      "title": "Virtual channels"
+    },
+    {
+      "actions": [
+        {
+          "action": "reset_replay",
+          "title": "Reset a counter"
+        },
+        {
+          "action": "reset_replay",
+          "params": {
+            "spi": "all"
+          },
+          "title": "Reset all"
+        }
+      ],
+      "columns": {
+        "floor": "Floor",
+        "kind": "Counter",
+        "updated": "Updated",
+        "value": "Last accepted"
+      },
+      "help": "The last accepted counter of each security association (kept in Valkey across restarts). Empty: no baseline, the next frame sets it (or an admin floor, with replay_baseline require).",
+      "key_title": "SPI",
+      "kind": "table",
+      "path": "replay.counters",
+      "row_actions": [
+        {
+          "action": "reset_replay",
+          "row_param": "spi",
+          "title": "Reset"
+        }
+      ],
+      "title": "Anti-replay counters"
+    }
+  ],
   "schema": {
     "fields": {
       "asm": {

@@ -217,6 +217,10 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
   - Each entry is self-contained: it copies the rule description, version and sha256, because the rules file may change later.
   - A storage failure never changes the firewall's decision. It is counted, and writes pause for 30 seconds.
 - **`StatusPublisher`** injects the `FIREWALL_STATUS` telemetry packet. It carries counts by stage, discarded bytes, quarantine counts, the untrusted flag, the rules version and the last rejection. It is throttled to at most one per second. It contains no packet bytes, so it is safe for operator screens.
+- **Traffic counts** (`lib/eaglegate_traffic.py`): every packet the rules judge is counted, allowed or not. The totals, bytes and sequence gaps are kept per APID.
+  - A sequence gap is a packet whose CCSDS sequence count isn't the previous one + 1 for its APID: packets lost upstream, a restarted sender, or injected packets. It is informational only; the `sequence` rule type decides what to do about it.
+  - Continuity starts over on each connection. Totals run from interface start.
+  - `FIREWALL_STATUS` carries `PACKETS`, `ALLOWED` and `SEQ_GAPS`, published at most once a second while traffic flows. The full table is in `interface_details` under `firewall.traffic`.
 - `interface_details("EAGLEGATE_INT")` also shows the rule hit counts, where the rules came from, the load and save errors, and the last 20 rejection reasons.
 - **Not built yet:** the review and release tool. The name `QUARANTINE_REVIEW` is reserved in `stream_names()`. Stream contents are admin-only.
 
@@ -279,5 +283,14 @@ INTERFACE ..._INT ...
 
 **Compatibility:** an extension states which API versions it supports. If it doesn't support this plugin's version, the rules don't load and the firewall denies everything, with the reason in `interface_details`. COSMOS can't make one plugin depend on another, so install this core plugin first.
 
+**A place on the Link status tab** (optional). The extension describes it as plain data, and the page draws it without knowing anything about the extension:
+- **`details_key`:** the section its protocol adds to `interface_details`.
+- **`panels`:** what of that section to show, as "values" grids or "table"s.
+- **`actions`:** admin-only protocol commands the page may send, with a form for their params. They can be buttons on a panel, or on each table row with the row's key filled in.
+- **Checks:** the vocabulary is in the `eaglegate_extensions.py` docstring. It is checked when the rules load, like the rest of the extension.
+- **How actions run:** the same way as Restore trust (admin request, then the command with its sha256, then an audit entry). The SDLS plugin uses this for its replay counters and Reset anti-replay counter.
+
 **On the rules page:** pick the interface at the top. The page lists every interface whose config has the firewall protocol, and each has its own rules. The extension's section appears as a form built from the schema the interface reports. Link conditions appear in the rule editor.
+
+**The Link status tab** shows the interface's traffic (packets per second, allowed, rejected by stage, the per-APID table with sequence gaps), the extensions' panels and actions, recent rejections, and recent admin actions. It refreshes every 2 seconds while open.
 

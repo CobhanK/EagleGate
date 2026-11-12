@@ -72,9 +72,7 @@ export async function firewallInterfaces() {
   return result.sort((a, b) => a.name.localeCompare(b.name))
 }
 
-// The "firewall" section the protocol adds to interface_details()
-export async function firewallState(iface) {
-  const details = await api.interface_details(iface)
+function firewallOf(iface, details) {
   const protocol = (details.read_protocols || []).find(
     (p) => p.name === PROTOCOL_CLASS,
   )
@@ -82,6 +80,21 @@ export async function firewallState(iface) {
     throw new Error(`${iface} has no ${PROTOCOL_CLASS} read protocol`)
   }
   return protocol.firewall
+}
+
+// The "firewall" section the protocol adds to interface_details()
+export async function firewallState(iface) {
+  return firewallOf(iface, await api.interface_details(iface))
+}
+
+// For the Link status tab: the firewall section plus every read protocol's
+// details, where extensions keep theirs (Extension.details_key)
+export async function linkState(iface) {
+  const details = await api.interface_details(iface)
+  return {
+    firewall: firewallOf(iface, details),
+    protocols: details.read_protocols || [],
+  }
 }
 
 export async function sha256(text) {

@@ -165,6 +165,13 @@ function checkValue(spec, value, where, errors) {
   }
 }
 
+// Problems with a plain form's values (e.g. an extension action's params), [] if none
+export function checkFields(specs, obj, where) {
+  const errors = []
+  checkObject(specs, obj, where, errors)
+  return errors
+}
+
 function checkObject(specs, obj, where, errors) {
   if (obj === null || typeof obj !== 'object' || Array.isArray(obj)) {
     errors.push(`${where} must be an object`)
