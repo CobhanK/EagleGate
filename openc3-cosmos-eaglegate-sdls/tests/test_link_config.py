@@ -70,8 +70,22 @@ def test_section_is_required():
     ({"virtual_channels": {"1": {"spi": [5], "mode": "x"}}}, "unknown key"),
     ({"virtual_channels": {"1": {"spi": [5]}, "0x1": {"spi": [5]}}}, "VCID 1 twice"),
     ({"unverified_auth": "maybe"}, "must be one of"),
-    ({"crypto": {"backend": "sidecar"}}, "must be one of"),
-    ({"crypto": {"backend": "none", "host": "x"}}, "unknown key"),
+    ({"crypto": {"backend": "cloud"}}, "must be one of"),
+    ({"crypto": {"backend": "none", "hots": "x"}}, "unknown key"),
+    ({"crypto": {"backend": "sidecar", "host": "evil host; rm"}}, "host name"),
+    ({"crypto": {"backend": "sidecar", "port": 0}}, "out of range"),
+    ({"crypto": {"backend": "sidecar", "timeout_ms": 5}}, "out of range"),
+    ({"crypto": {"backend": "sidecar", "key_id": "a b"}}, "key_id"),
+    ({"crypto": {"backend": "sidecar", "on_unavailable": "allow"}}, "must be one of"),
+    ({"crypto": {"backend": "sidecar", "test_keys": "ignore"}}, "must be one of"),
+    ({"security_associations": {"5": {"mode": "clear", "ekid": 3}}}, "ekid is for encrypting SAs"),
+    ({"security_associations": {"5": {"mode": "clear"}, "6": {"mode": "enc", "iv_len": 12, "akid": 3}}},
+     "akid is for authenticating SAs"),
+    ({"security_associations": {"5": {"mode": "clear", "not_after": "next tuesday"}}}, "UTC time"),
+    ({"security_associations": {"5": {"mode": "clear", "not_after": "2027-01-01T00:00:00"}}}, "UTC time"),
+    ({"security_associations": {"5": {"mode": "clear", "max_frames": 0}}}, "out of range"),
+    ({"rekey_warn_percent": 0}, "out of range"),
+    ({"rekey_warn_percent": 101}, "out of range"),
     ({"max_forward_jump": 0}, "out of range"),
 ])
 def test_bad_sections_are_refused(changes, message):
@@ -114,4 +128,25 @@ def test_schema_describes_exactly_what_the_parser_accepts():
     assert set(LINK_SCHEMA["fields"]) == _TOP_KEYS
     assert set(SA_SCHEMA["fields"]) == _SA_KEYS
     assert LINK_KEYS["protection"]["values"] == list(PROTECTIONS)
-    assert set(LINK_SCHEMA["fields"]["crypto"]["fields"]) == {"backend"}
+    assert set(LINK_SCHEMA["fields"]["crypto"]["fields"]) == {"backend", "host", "port", "timeout_ms", "key_id",
+                                                              "on_unavailable", "test_keys"}
+
+
+def test_sidecar_and_key_management_settings():
+    raw = link(crypto={"backend": "sidecar", "host": "sidecar.local", "port": 7711, "timeout_ms": 200,
+                       "key_id": "k-2026", "on_unavailable": "unverified", "test_keys": "deny"},
+               rekey_warn_percent=75)
+    raw["security_associations"]["7"].update(akid=130, not_after="2027-06-30T00:00:00Z", max_frames=1000000)
+    raw["security_associations"]["6"].update(ekid=9, not_after="2027-06-30")
+    config = parse_link_config(raw)
+    crypto = config.crypto
+    assert (crypto.backend, crypto.host, crypto.port, crypto.timeout_ms, crypto.key_id, crypto.on_unavailable,
+            crypto.test_keys) == ("sidecar", "sidecar.local", 7711, 200, "k-2026", "unverified", "deny")
+    assert config.rekey_warn_percent == 75
+    auth, enc = config.sas[7], config.sas[6]
+    assert (auth.akid, auth.ekid, auth.max_frames, auth.not_after_time().year) == (130, None, 1000000, 2027)
+    assert (enc.ekid, enc.not_after_time().month) == (9, 6)
+    assert auth.counter_width() == 2 and enc.counter_width() == 12 and config.sas[5].counter_width() == 0
+    defaults = parse_link_config(link(crypto={"backend": "sidecar"})).crypto
+    assert (defaults.host, defaults.port, defaults.timeout_ms, defaults.on_unavailable, defaults.test_keys) == \
+        ("eaglegate-sdls-sidecar", 7710, 500, "deny", "warn")

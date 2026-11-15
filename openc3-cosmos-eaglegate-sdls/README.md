@@ -12,12 +12,14 @@ radio / ground station --frames--> [ SDLS frame protocol ]  ---packets + link va
                                     anti-replay, reassembly                                  FIREWALL_STATUS
 ```
 
-**Phase 1 (this version) does no cryptography.**
-- It enforces everything about the link that can be checked without keys.
-- It labels frames of authenticated SAs as `auth_unverified`.
-- It cannot read encrypted SAs.
+**Two crypto backends** (`link.crypto.backend`):
+- **`none`** (the default): no cryptography.
+  - It enforces everything about the link that can be checked without keys.
+  - It labels frames of authenticated SAs as `auth_unverified`.
+  - It can't read encrypted SAs.
+- **`sidecar`** (Phase 2): NASA CryptoLib verifies and decrypts frames in the `eaglegate-sdls-sidecar` container. The keys stay there. See "The CryptoLib sidecar" below, and [../eaglegate-sdls-sidecar/README.md](../eaglegate-sdls-sidecar/README.md).
 
-Phase 2 adds a CryptoLib sidecar that verifies and decrypts frames (see "Phase 2" below).
+Design decisions and findings are in [../DECISIONS.md](../DECISIONS.md).
 
 ## Contents
 
@@ -37,10 +39,12 @@ Phase 2 adds a CryptoLib sidecar that verifies and decrypts frames (see "Phase 2
 | `eaglegate_sdls_tm_frame.py` | Parses TM frames and the SDLS header and trailer; FECF (CRC-16); CCSDS de-randomizer |
 | `eaglegate_sdls_link_config.py` | The rules file's `link` section: parser, defaults, and the schema the rules page renders |
 | `eaglegate_sdls_policy.py` | The per-frame checks, in order, and whether each one decides trust |
-| `eaglegate_sdls_frame_security.py` | **The crypto seam.** `NoCrypto` now, the sidecar backend in Phase 2 |
-| `eaglegate_sdls_replay.py` | Telemetry anti-replay, kept per SPI in Valkey |
+| `eaglegate_sdls_frame_security.py` | **The crypto seam.** `NoCrypto`, or `SidecarCrypto` |
+| `eaglegate_sdls_sidecar_backend.py` | `SidecarCrypto`: frames to the CryptoLib sidecar, its answers checked, and its SA table compared with the rules |
+| `eaglegate_sdls_keys.py` | Key status: keys due for replacement, test keys (the Keys panel) |
+| `eaglegate_sdls_replay.py` | Telemetry anti-replay, per SPI and per key epoch, kept in Valkey; counter-reuse detection |
 | `eaglegate_sdls_reassembler.py` | Packets out of data fields: spanning frames, first-header-pointer resync, idle packets |
-| `eaglegate_sdls_sidecar_protocol.py` | DRAFT wire format for the Phase 2 sidecar (tested, not used yet) |
+| `eaglegate_sdls_sidecar_protocol.py` | Wire protocol v1 with the sidecar (HMAC-SHA256). The sidecar image copies this same file |
 
 ## Install
 
@@ -86,6 +90,7 @@ The radio simulator (`components/generic_radio`) sends each frame as one CADU:
 - **Keep the SDLS counters across restarts**, using a CryptoLib `SA_CUSTOM` backend that saves IV/ARSN in blocks. Otherwise the IVs repeat (with GCM, that breaks the encryption) and every frame after a reboot looks like a replay.
 - **Use 4-byte sequence numbers.** A 2-byte one wraps after 65,536 frames, which looks like a replay.
 - **Give SPI 6 a MAC** (`ast=1`, `stmacf_len=16`).
+- **Give SPI 7 an authentication bit mask** over the header and data (`abm` all 0xFF). Today it is all zeros, so its MAC covers nothing. Set `"abm": "ones"` in the sidecar's configuration to match.
 - **Default TO to `VC_AUTH`.**
 
 ## The `link` section
@@ -97,17 +102,23 @@ The `link` section lives in the same rules file as the packet rules (`targets/EA
 | `scid`, `frame_length` | required | Spacecraft ID and bytes per frame, without the ASM |
 | `asm` | `1ACFFC1D` | Sync marker (hex), or `""` for frames that arrive one per datagram, already aligned |
 | `randomized`, `has_fecf`, `has_ocf`, `secondary_header` | `false` | Must match the spacecraft |
-| `security_associations` | required | By SPI: `mode` (clear/auth/enc/authenc), `iv_len`, `sn_len`, `pl_len`, `mac_len`, `replay` (none/sn/iv; derived from the lengths when left out), optional `max_forward_jump` |
+| `security_associations` | required | By SPI: `mode` (clear/auth/enc/authenc), `iv_len`, `sn_len`, `pl_len`, `mac_len`, `replay` (none/sn/iv; derived from the lengths when left out), optional `max_forward_jump`. For key management: `ekid` / `akid` (the key ids the sidecar must use, or the SA's frames are refused), `not_after` (UTC time) and `max_frames` (both produce warnings when the key is due) |
 | `virtual_channels` | required | By VCID: `{"spi": [...]}`, the SPIs allowed on that channel. Frames on any other VC are rejected |
 | `unverified_auth` | `allow` | Frames of authenticated SAs whose MAC nobody checked: `allow` (as `auth_unverified`) or `deny` |
 | `encrypted_without_backend` | `deny` | Encrypted frames without a crypto backend: `deny` (quarantine) or `drop` (count only) |
 | `frame_counter_gap` | `warn` | A virtual channel frame-count jump: `warn` (count it, and drop a packet that spanned the gap), `deny`, `ignore` |
 | `max_forward_jump` | `1000` | How far a counter may jump ahead. Set it above the block size the spacecraft reserves when saving counters |
 | `replay_baseline` | `learn` | No remembered counter: `learn` from the first frame, or `require` an admin floor first |
-| `verified_forward` | `limit` | Phase 2: `any` accepts any increase on frames whose MAC verified |
+| `verified_forward` | `limit` | `any` accepts any increase on frames whose MAC verified, but only when the MAC covers the counter |
 | `idle` | `drop` | Idle packets (APID 0x7FF): `drop` or `keep` (pass to the firewall) |
 | `untrust_on_first_frame_reject` | `true` | See "Trust" below |
-| `crypto.backend` | `none` | `none` in Phase 1 |
+| `rekey_warn_percent` | `90` | Warn when an SA's anti-replay counter has used this share of its range |
+| `crypto.backend` | `none` | `none`, or `sidecar` |
+| `crypto.host` / `port` | `eaglegate-sdls-sidecar` / `7710` | Where the sidecar listens |
+| `crypto.timeout_ms` | `500` | How long to wait for the answer for one frame |
+| `crypto.key_id` | `default` | The channel key's id (the key itself is the COSMOS secret `EAGLEGATE_SIDECAR_KEY`) |
+| `crypto.on_unavailable` | `deny` | Sidecar unreachable: `deny`, or `unverified` (as if there were no backend) |
+| `crypto.test_keys` | `warn` | An SA on one of CryptoLib's published test keys: `warn` (red warning), or `deny` |
 
 **Packet rules can use the link:** `"match": {"link": {"vcid": [5], "spi": [7], "protection": ["clear"]}}`.
 - `protection` is `clear`, `auth_unverified`, `enc`, `auth` or `authenc`.
@@ -125,8 +136,8 @@ The `link` section lives in the same rules file as the packet rules (`targets/EA
 | 8 | **SPI configured and allowed on this VC.** CryptoLib picks the SA by SPI alone, so a frame could downgrade to the clear SA | sdls | yes |
 | 9 | Frame long enough for the SA's header and trailer | sdls | yes |
 | 10 | First header pointer inside the data field | frame | yes |
-| 11 | Crypto backend (Phase 1: none) | sdls | only a failed MAC (Phase 2) |
-| 12 | **Anti-replay** (CryptoLib only checks it for commands) | sdls | **no** |
+| 11 | Crypto backend (none, or the CryptoLib sidecar) | sdls | only a MAC CryptoLib refused. Sidecar down, SA mismatch and test-key denial don't |
+| 12 | **Anti-replay**, per key epoch (EagleGate's, not CryptoLib's) | sdls | **no** |
 | 13 | VC frame count | frame | **no** |
 
 **Where rejections go:**
@@ -147,7 +158,7 @@ The radio simulator never reconnects on its own, so Restore trust matters here. 
 - **What is remembered:** per SPI, the last accepted sequence number (or IV, for counter-IV GCM SAs). It is stored in Valkey (`{scope}__EAGLEGATE_SDLS__REPLAY__{interface}`), so restarting COSMOS doesn't reopen the replay window.
 - **What is refused:**
   - a counter at or below the last accepted one;
-  - a counter more than `max_forward_jump` ahead. Until Phase 2 checks the MAC, one forged huge counter could otherwise lock out every real frame.
+  - a counter more than `max_forward_jump` ahead. Unless the MAC covers the counter (sidecar, and `verified_forward: any`), one forged huge counter could otherwise lock out every real frame.
 - **When it changes:** only for frames that were finally accepted.
 
 **When the spacecraft loses its counters**, every frame is refused with "possible spacecraft counter loss". An admin then resets the counter on the EagleGate Firewall page:
@@ -163,19 +174,47 @@ The tab also shows this protocol's frame counts, frame sync, packets from frames
 
 The request must be recent and is used once. Operators who can send commands but can't upload to the admin-only path can't do it. Every reset, and every refusal, goes to the audit stream.
 
-## Phase 2: the CryptoLib sidecar
+## The CryptoLib sidecar
 
-The seams are already in place and tested:
+With `"crypto": {"backend": "sidecar"}`, each frame of an authenticating or encrypting SA goes to the `eaglegate-sdls-sidecar` container. Clear SAs are never sent. There, NASA CryptoLib 1.5.1 checks the MAC and/or decrypts the frame. Setup is in [../eaglegate-sdls-sidecar/README.md](../eaglegate-sdls-sidecar/README.md).
 
-- **`FrameSecurity`** (`eaglegate_sdls_frame_security.py`): the policy asks a backend to `process(frame, sa)` and gets a `SecurityResult`.
-  - The statuses are clear, unverified, verified, decrypted, unreadable, failed and unavailable.
-  - The policy handles each one: failed decides trust; unavailable doesn't; verified enables `verified_forward`.
-  - `tests/test_policy.py` drives it with fake Phase 2 backends.
-- **The sidecar wire format** (`eaglegate_sdls_sidecar_protocol.py`): length-prefixed JSON over a socket, with `hello` (CryptoLib version and SA table) and `tm_process`. Keys never leave the sidecar.
-- **The SA table check** (`FrameSecurity.sa_table()`): compare the sidecar's SAs with `security_associations` at connect.
-- **Anti-replay stays here.** The sidecar must not keep IV/ARSN state that a rejected frame could change.
+**The channel:**
+- HMAC-SHA256 on every request and every answer, with the channel key from the COSMOS secret `EAGLEGATE_SIDECAR_KEY`. A fake sidecar can't claim "verified", and nothing else can use the sidecar to decrypt frames.
+- Each answer names the SHA-256 of its frame.
+- For "verified" frames, EagleGate also checks that the data returned is the data the frame carries.
 
-To do: the sidecar process (CryptoLib with `KEY_CUSTOM` keys from COSMOS Secrets, in its own container), a `SidecarCrypto` backend, `"sidecar"` in `BACKENDS` and the `crypto` schema, and a test against a sidecar double.
+**At connect, the sidecar's SA table is compared with `security_associations`:** mode, field lengths, VC binding, and `ekid`/`akid` when the rules give them. An SA that differs is refused (`BACKEND_REFUSED`), and the Crypto backend panel shows the differences.
+
+**What "verified" means:**
+- For authentication-only SAs, CryptoLib MACs only the frame bytes that the SA's authentication bit mask selects.
+- The sidecar reports what the mask covers.
+- A frame whose mask leaves out the data field stays `auth_unverified`, never `auth`.
+- The anti-replay counter counts as authenticated only when the mask covers it.
+
+**NOS3's SPI 7 has an all-zero mask, so its MAC covers nothing** (finding F1 in DECISIONS.md). Fix it on the spacecraft (see "NOS3 setup").
+
+**Key management** (DECISIONS.md, "Key-management items adopted"):
+- **Key epochs.**
+  - The sidecar reports each SA's key ids and SHA-256 fingerprints.
+  - A counter belongs to the key it was counted under, so a new key starts a new anti-replay baseline.
+  - The counter is logged when that happens, as `NEW_KEYS`.
+- **Due for replacement.** A key is due when:
+  - the counter passes `rekey_warn_percent` of its range;
+  - `not_after` has passed; or
+  - `max_frames` is reached.
+
+  This shows in the Keys panel and in `REKEY_DUE`. It is a warning only: replacing keys is the mission's job.
+- **Counter reuse.** A verified frame that repeats an accepted counter under the same key, with different content, is rejected as `COUNTER REUSE` and logged as an error. The spacecraft reused an IV or sequence number, so the key must be replaced.
+- **Test keys.** Keys whose fingerprint matches one of CryptoLib's published test keys are flagged in red (`TEST_KEYS`). With `test_keys: deny`, frames under them are refused.
+
+**Status:**
+- The Link status tab adds the **Crypto backend** and **Keys** panels.
+- `LINK_STATUS` adds:
+  - `VERIFIED_FRAMES`, `DECRYPTED_FRAMES`, `MAC_FAILURES`
+  - `BACKEND_REFUSED`, `BACKEND_UNAVAILABLE`
+  - `COUNTER_REUSE`
+  - `SIDECAR_UP`, `SIDECAR_LATENCY_MS`
+  - `REKEY_DUE`, `TEST_KEYS`, `NEW_KEYS`
 
 ## Tests
 
@@ -187,7 +226,9 @@ From this folder, with the repository's dev venv: `../.venv/bin/python -m pytest
 
 ## Known limits
 
-- **No crypto:** MACs aren't verified (`auth_unverified`), encrypted SAs can't be read, and the anti-replay counter isn't authenticated.
+- **Without the sidecar** (`backend: none`): MACs aren't verified (`auth_unverified`), encrypted SAs can't be read, and the anti-replay counter isn't authenticated.
+- **The sidecar uses CryptoLib's built-in test keys** (NOS3's). A key loader that reads a docker secret (`KEY_CUSTOM`) is planned.
+- **The sidecar shares COSMOS's docker network.** Use an internal network to deny it outbound access.
 - **TM only:** no AOS or USLP. No SDLS-EP (key management) and no command (TC) side.
 - **Not tested inside a running COSMOS and NOS3 yet.** In particular, check the clear SA's IV field on real frames, and check the plugin install with `MAP_TLM_TARGET ... DISABLED`.
 - **The Link status tab** shows a snapshot each time it refreshes (every 2 seconds). History is in COSMOS telemetry (`LINK_STATUS`, `FIREWALL_STATUS`).

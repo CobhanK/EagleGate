@@ -63,6 +63,8 @@
         "crypto_backend": "Crypto backend",
         "in_lock": "Frame sync",
         "mode": "Mode",
+        "rekey_due": "Keys due for replacement",
+        "test_keys": "SAs on TEST KEYS",
         "would_untrust": "Would untrust (monitor)"
       },
       "kind": "values",
@@ -72,19 +74,61 @@
     {
       "items": {
         "accepted": "Accepted",
-        "backend_failures": "Backend failures",
+        "backend_failures": "Backend unavailable",
+        "backend_refused": "Refused (SA mismatch / test key)",
+        "counter_reuse": "Counter reuse (key holder)",
+        "decrypted": "Decrypted (CryptoLib)",
         "fecf_errors": "FECF errors",
         "frames": "Received",
+        "mac_failures": "Refused by CryptoLib",
         "mc_count_gaps": "MC count gaps",
         "rejected": "Rejected",
         "replay_rejections": "Replay rejections",
         "unreadable": "Not decrypted",
         "unverified": "MAC not checked",
-        "vc_count_gaps": "VC count gaps"
+        "vc_count_gaps": "VC count gaps",
+        "verified": "MAC verified (CryptoLib)"
       },
       "kind": "values",
       "path": "frames",
       "title": "Frames"
+    },
+    {
+      "help": "NASA CryptoLib in the eaglegate-sdls-sidecar container (link.crypto.backend sidecar). Keys stay there; EagleGate sees only their fingerprints.",
+      "items": {
+        "backend": "Backend",
+        "connected": "Connected",
+        "cryptolib": "CryptoLib",
+        "key_source": "Key source",
+        "last_error": "Last error",
+        "latency_ms": "Latency (ms)",
+        "mismatch": "Differences",
+        "sa_match": "SA table matches the rules",
+        "sidecar": "Sidecar",
+        "test_key_spis": "SPIs on TEST KEYS"
+      },
+      "kind": "values",
+      "path": "crypto",
+      "title": "Crypto backend"
+    },
+    {
+      "columns": {
+        "akid": "AKID",
+        "counter_used": "Counter used",
+        "due": "Due for replacement",
+        "ekid": "EKID",
+        "fingerprints": "Fingerprints",
+        "frames": "Frames under key",
+        "mask_covers_data": "MAC covers data",
+        "mode": "Mode",
+        "not_after": "Not after",
+        "test_key": "TEST KEY"
+      },
+      "help": "Which key protects each SA (ids and SHA-256 fingerprints from the sidecar) and whether it is due for replacement: counter near the end of its range (rekey_warn_percent), past not_after, or max_frames reached. A new key starts a new anti-replay baseline.",
+      "key_title": "SPI",
+      "kind": "table",
+      "path": "keys",
+      "title": "Keys"
     },
     {
       "items": {
@@ -124,6 +168,8 @@
       ],
       "columns": {
         "floor": "Floor",
+        "frames": "Frames under key",
+        "key": "Key epoch",
         "kind": "Counter",
         "updated": "Updated",
         "value": "Last accepted"
@@ -157,14 +203,66 @@
             "help": "who verifies and decrypts frames",
             "type": "enum",
             "value_help": {
-              "none": "nobody: authenticated frames stay auth_unverified, encrypted frames unreadable"
+              "none": "nobody: authenticated frames stay auth_unverified, encrypted frames unreadable",
+              "sidecar": "NASA CryptoLib in the eaglegate-sdls-sidecar container (keys stay there)"
             },
             "values": [
-              "none"
+              "none",
+              "sidecar"
             ]
+          },
+          "host": {
+            "default": "eaglegate-sdls-sidecar",
+            "help": "the sidecar's host name",
+            "type": "string"
+          },
+          "key_id": {
+            "default": "default",
+            "help": "id of the channel key (secret EAGLEGATE_SIDECAR_KEY) the sidecar knows it by",
+            "type": "string"
+          },
+          "on_unavailable": {
+            "default": "deny",
+            "help": "frames that arrive while the sidecar cannot be reached",
+            "type": "enum",
+            "value_help": {
+              "deny": "reject them (fail closed)",
+              "unverified": "treat them as if there were no backend: authenticated frames pass as auth_unverified (if unverified_auth allows), encrypted frames are unreadable"
+            },
+            "values": [
+              "deny",
+              "unverified"
+            ]
+          },
+          "port": {
+            "default": 7710,
+            "help": "the sidecar's TCP port",
+            "max": 65535,
+            "min": 1,
+            "type": "int"
+          },
+          "test_keys": {
+            "default": "warn",
+            "help": "an SA whose key the sidecar recognizes as one of CryptoLib's published test keys",
+            "type": "enum",
+            "value_help": {
+              "deny": "reject its frames (operations)",
+              "warn": "accept its frames and show a red warning (labs, NOS3)"
+            },
+            "values": [
+              "warn",
+              "deny"
+            ]
+          },
+          "timeout_ms": {
+            "default": 500,
+            "help": "how long to wait for the sidecar's answer to one frame",
+            "max": 10000,
+            "min": 10,
+            "type": "int"
           }
         },
-        "help": "the crypto backend (Phase 2)",
+        "help": "the crypto backend",
         "type": "object"
       },
       "encrypted_without_backend": {
@@ -245,6 +343,13 @@
         "help": "frames are CCSDS pseudo-randomized",
         "type": "bool"
       },
+      "rekey_warn_percent": {
+        "default": 90,
+        "help": "warn (Keys panel, LINK_STATUS REKEY_DUE) when an SA's anti-replay counter has used this much of its range: the key must be replaced before the counter wraps, or IVs repeat",
+        "max": 100,
+        "min": 1,
+        "type": "int"
+      },
       "replay_baseline": {
         "default": "learn",
         "help": "when there is no last accepted counter for an SA",
@@ -282,6 +387,18 @@
         "type": "map",
         "value": {
           "fields": {
+            "akid": {
+              "help": "authentication key id the crypto backend must use for this SA (empty: any)",
+              "max": 65535,
+              "min": 0,
+              "type": "int"
+            },
+            "ekid": {
+              "help": "encryption key id the crypto backend must use for this SA; a different one stops its frames (empty: any)",
+              "max": 65535,
+              "min": 0,
+              "type": "int"
+            },
             "iv_len": {
               "default": 0,
               "help": "IV field bytes in the header",
@@ -298,6 +415,12 @@
             },
             "max_forward_jump": {
               "help": "this SA's limit on how far the counter may jump ahead (default: the link's)",
+              "max": 9223372036854775807,
+              "min": 1,
+              "type": "int"
+            },
+            "max_frames": {
+              "help": "frames accepted under one key before it is due for replacement (a warning)",
               "max": 9223372036854775807,
               "min": 1,
               "type": "int"
@@ -319,6 +442,11 @@
                 "enc",
                 "authenc"
               ]
+            },
+            "not_after": {
+              "allow_empty": true,
+              "help": "UTC time after which this SA's key is due for replacement, e.g. 2027-06-30T00:00:00Z (a warning, frames still pass)",
+              "type": "string"
             },
             "pl_len": {
               "default": 0,
@@ -413,5 +541,5 @@
     "type": "object"
   },
   "section": "link",
-  "version": "0.1.0"
+  "version": "0.2.0"
 }

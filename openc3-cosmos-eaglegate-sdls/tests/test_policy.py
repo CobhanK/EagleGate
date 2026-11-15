@@ -206,6 +206,7 @@ def test_failed_mac_decides_trust_unavailable_backend_does_not():
 def test_no_crypto_classifies_by_sa():
     assert NoCrypto().process(None, parse_link_config(NOS3).sas[6]).status == "unreadable"
     assert make_backend(CryptoConfig("none")).name == "none"
+    assert make_backend(CryptoConfig("sidecar")).name == "sidecar"
     with pytest.raises(ValueError, match="not available"):
-        make_backend(CryptoConfig("sidecar"))
+        make_backend(CryptoConfig("cloud"))
     assert CLEAR == "clear"

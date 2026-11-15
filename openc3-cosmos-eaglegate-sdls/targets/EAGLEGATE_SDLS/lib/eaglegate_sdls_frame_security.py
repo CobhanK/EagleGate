@@ -5,15 +5,15 @@ backend to process each frame that passed the header and SPI checks, and gets
 back a SecurityResult: the protection the frame actually has, and the data
 field to take packets from (plaintext, for encrypted SAs).
 
-  Phase 1 (this version): NoCrypto. Clear frames pass as "clear"; frames of
-  authenticated SAs pass as "auth_unverified" (their MAC is not checked);
+  NoCrypto (link.crypto.backend "none"). Clear frames pass as "clear"; frames
+  of authenticated SAs pass as "auth_unverified" (their MAC is not checked);
   frames of encrypting SAs are "unreadable".
 
-  Phase 2: a sidecar process running NASA CryptoLib (crash isolation: a fault
-  in C code cannot take down the COSMOS interface). The protocol for talking to
-  it is drafted in eaglegate_sdls_sidecar_protocol.py; a SidecarCrypto backend
-  implementing this class will send each frame there. Keys stay in the sidecar:
-  EagleGate never sees them.
+  SidecarCrypto (backend "sidecar", eaglegate_sdls_sidecar_backend.py): NASA
+  CryptoLib in its own container (crash isolation: a fault in C code cannot
+  take down the COSMOS interface), over the authenticated wire protocol in
+  eaglegate_sdls_sidecar_protocol.py. Keys stay in the sidecar: EagleGate only
+  sees their SHA-256 fingerprints.
 
 Anti-replay is NOT the backend's job: CryptoLib does not check it for
 telemetry, so EagleGate keeps doing it (eaglegate_sdls_replay.py), and moves
@@ -29,6 +29,8 @@ DECRYPTED = "decrypted"    # backend decrypted (and, for authenc, verified)
 UNREADABLE = "unreadable"  # encrypted SA and no backend that can decrypt it
 FAILED = "failed"          # backend checked and refused: bad MAC, decryption error
 UNAVAILABLE = "unavailable"  # the backend could not be reached or crashed
+REFUSED = "refused"        # the backend will not check this SA's frames (its SA differs from the rules,
+                           # or a test key under link.crypto.test_keys deny): rejected, never decides trust
 
 
 @dataclass(frozen=True)
@@ -37,6 +39,10 @@ class SecurityResult:
     protection: str = None    # what the frame guarantees (eaglegate_sdls_link_config.PROTECTIONS)
     data_field: bytes = None  # where to take packets from; None when unreadable/refused
     detail: str = ""          # why, for FAILED/UNAVAILABLE (never key material)
+    pad_removed: bool = False  # data_field already has the PL padding removed (CryptoLib does that)
+    key_epoch: str = None     # which key(s) protected the frame (fingerprints); None when unknown
+    counter_verified: bool = False  # the MAC covered the anti-replay counter (SN/IV) field
+    warnings: tuple = ()      # notes for the operator (e.g. a mask that leaves data unauthenticated)
 
     @property
     def usable(self):
@@ -53,14 +59,26 @@ class FrameSecurity:
         its SA (SaConfig). Must not raise: report problems as FAILED/UNAVAILABLE."""
         raise NotImplementedError
 
+    def configure(self, link_config):
+        """The rules' link section changed (same backend settings)."""
+
+    def key_epoch(self, spi):
+        """The current key epoch of an SA (fingerprints), None when unknown."""
+        return None
+
+    def sa_keys(self):
+        """{spi: {...}} what the backend knows about each SA's keys (Keys panel)."""
+        return {}
+
     def sa_table(self):
         """The backend's own SA settings {spi: {...}}, to compare with the rules
         file's security_associations at connect. None when it has none."""
         return None
 
     def status(self):
-        """Plain data for interface_details."""
-        return {"backend": self.name}
+        """Plain data for interface_details (the Crypto backend panel)."""
+        return {"backend": self.name, "connected": None, "sidecar": None, "cryptolib": None, "key_source": None,
+                "sa_match": None, "mismatch": None, "test_key_spis": None, "latency_ms": None, "last_error": None}
 
     def close(self):
         """Release connections (called on disconnect)."""
@@ -80,8 +98,12 @@ class NoCrypto(FrameSecurity):
         return SecurityResult(CLEAR, protection="clear", data_field=frame.data_field)
 
 
-def make_backend(crypto_config):
+def make_backend(crypto_config, link_config=None, interface_name="?"):
     """The backend the rules file's link.crypto section asks for."""
     if crypto_config.backend == "none":
         return NoCrypto()
+    if crypto_config.backend == "sidecar":
+        from eaglegate_sdls_sidecar_backend import SidecarCrypto
+
+        return SidecarCrypto(crypto_config, link_config, interface_name)
     raise ValueError(f"crypto backend {crypto_config.backend!r} is not available in this version")

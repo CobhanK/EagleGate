@@ -68,3 +68,21 @@ TELEMETRY EAGLEGATE_SDLS LINK_STATUS BIG_ENDIAN "SDLS frame counts and the last 
   APPEND_ITEM    LAST_SPI            32 INT     "SPI of the last rejected frame (-1 = unknown)"
   APPEND_ITEM    LAST_LAYER          96 STRING  "frame, sdls or reassembly"
   APPEND_ITEM    LAST_REASON       2048 STRING  "Why the last frame (or packet piece) was rejected"
+  APPEND_ITEM    VERIFIED_FRAMES     32 UINT    "Frames whose MAC CryptoLib verified (sidecar), and whose mask covers the data"
+  APPEND_ITEM    DECRYPTED_FRAMES    32 UINT    "Frames CryptoLib decrypted (sidecar)"
+  APPEND_ITEM    MAC_FAILURES        32 UINT    "Frames CryptoLib refused (bad MAC or decryption error)"
+    LIMITS DEFAULT 1 ENABLED -2 -1 0.5 1
+  APPEND_ITEM    BACKEND_REFUSED     32 UINT    "Frames refused because the sidecar's SA differs from the rules, or a test key under test_keys deny"
+  APPEND_ITEM    BACKEND_UNAVAILABLE 32 UINT    "Frames that arrived while the crypto backend could not be reached"
+  APPEND_ITEM    COUNTER_REUSE       32 UINT    "Verified frames that reused an anti-replay counter with other content (key holder reused an IV/SN)"
+    LIMITS DEFAULT 1 ENABLED -2 -1 0.1 0.5
+  APPEND_ITEM    SIDECAR_UP           8 UINT    "Connection to the CryptoLib sidecar"
+    STATE DOWN 0 RED
+    STATE UP 1 GREEN
+    STATE NOT_USED 2
+  APPEND_ITEM    SIDECAR_LATENCY_MS  32 FLOAT   "Round trip of the last frame to the sidecar (ms)"
+  APPEND_ITEM    REKEY_DUE           16 UINT    "SAs whose key is due for replacement (counter range, not_after, max_frames)"
+    LIMITS DEFAULT 1 ENABLED -2 -1 0.1 0.5
+  APPEND_ITEM    TEST_KEYS           16 UINT    "SAs protected by one of CryptoLib's published TEST KEYS (never in operations)"
+    LIMITS DEFAULT 1 ENABLED -2 -1 0.1 0.5
+  APPEND_ITEM    NEW_KEYS            32 UINT    "Times an SA's key changed (a new anti-replay baseline started)"

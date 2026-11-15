@@ -38,3 +38,7 @@ INTERFACE <%= sdls_target_name %>_INT openc3/interfaces/udp_interface.py <%= fra
   PROTOCOL READ eaglegate_firewall_protocol.py <%= fw_max_length %> <%= sdls_target_name %>/rules/firewall_rules.json
   # Sign the applied rules (and with them the link section); see the core plugin's plugin.txt
   # SECRET ENV EAGLEGATE_RULES_KEY EAGLEGATE_RULES_KEY
+  # CryptoLib sidecar (link.crypto.backend "sidecar"): the channel key shared with the
+  # eaglegate-sdls-sidecar container (hex, 32+ bytes; ./eagle.sh sidecar-key). Create the
+  # COSMOS secret EAGLEGATE_SIDECAR_KEY first (Admin Console > Secrets), then uncomment:
+  # SECRET ENV EAGLEGATE_SIDECAR_KEY EAGLEGATE_SIDECAR_KEY

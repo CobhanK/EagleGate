@@ -26,6 +26,26 @@ SDLS frame layer
   for an SPI with no baseline yet, and refusals (bad SPI, floor too big). Each shows under Admin actions.
 - LINK_STATUS and FIREWALL_STATUS values (incl. DENIED_LINK) match what happened; screens render.
 
+CryptoLib sidecar (Phase 2)
+---------------------------
+- ./eagle.sh build-sidecar, test-sidecar (all tests pass against the real CryptoLib), sidecar-key, run-sidecar.
+- COSMOS secret EAGLEGATE_SIDECAR_KEY = the key file's hex; SECRET ENV line enabled; plugin reinstalled.
+- Rules page, link section: crypto.backend sidecar. Link status tab: Crypto backend panel shows connected,
+  CryptoLib 1.5.1, SA table matches, latency; LINK_STATUS SIDECAR_UP = UP.
+- Keys panel: SPI 6 and 7 show key ids, fingerprints and TEST KEY (red, TEST_KEYS = 2); SPI 7 shows
+  "MAC covers data: no" (NOS3's zero mask) and its frames stay auth_unverified.
+- TO_SET_VCID_CC to VC4 (SPI 6): packets decrypt (protection enc, DECRYPTED_FRAMES rises); a rule denying
+  protection "enc" blocks them.
+- With "abm": "ones" on both the spacecraft SA and config/nos3.json SPI 7: protection auth, VERIFIED_FRAMES
+  rises; a flipped bit is refused by CryptoLib (MAC_FAILURES).
+- docker stop the sidecar: frames rejected as unavailable (deny) or auth_unverified/unreadable
+  (on_unavailable unverified); SIDECAR_UP = DOWN; it reconnects by itself after a restart.
+- Wrong channel key in COSMOS: nothing verifies, last error says the hello failed authentication.
+- Rules ekid/akid that differ from the sidecar: that SPI's frames refused (BACKEND_REFUSED), Differences shown.
+- test_keys deny: SPI 6/7 frames refused.
+- Restart the sidecar with another key for an SA: NEW_KEYS rises, the anti-replay counter relearns.
+- rekey_warn_percent / not_after / max_frames: the Keys panel shows "Due for replacement", REKEY_DUE > 0.
+
 Core plugin (new)
 -----------------
 - Rules page: interface selector lists EAGLEGATE_INT and EAGLEGATE_SDLS_INT, each with its own rules.

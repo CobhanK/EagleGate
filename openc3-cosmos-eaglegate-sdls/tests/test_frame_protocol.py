@@ -476,7 +476,7 @@ def test_replay_table_lists_counted_sas_before_their_first_frame():
     """So an admin can set a floor for an SA that has not sent anything yet."""
     iface, _, _, _ = build()
     counters = iface.details()["read_protocols"][0]["sdls"]["replay"]["counters"]
-    assert counters["7"] == {"kind": "sn", "value": None, "floor": None, "updated": ""}
+    assert counters["7"] == {"kind": "sn", "value": None, "floor": None, "updated": "", "key": None, "frames": 0}
     assert "5" not in counters  # the clear SA has no counter
 
 

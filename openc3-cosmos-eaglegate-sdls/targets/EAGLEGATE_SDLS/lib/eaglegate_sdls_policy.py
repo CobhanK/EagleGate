@@ -11,8 +11,8 @@
      this virtual channel                                          CryptoLib allows
   9  frame long enough for the SA       sdls    decides trust
  10  first header pointer in range      frame   decides trust
- 11  crypto backend (Phase 1: none)     sdls    only a failed MAC decides trust
- 12  anti-replay                        sdls    never decides trust
+ 11  crypto backend (none or sidecar)   sdls    only a failed MAC decides trust
+ 12  anti-replay (per key epoch)        sdls    never decides trust
  13  virtual channel frame count        frame   never; "warn" by default
 
 "Decides trust": as a connection's FIRST frame, this rejection means the sender
@@ -25,13 +25,14 @@ and the anti-replay counter), so a rejected frame cannot move anything.
 """
 from dataclasses import dataclass, field
 
-from eaglegate_sdls_frame_security import (CLEAR, DECRYPTED, FAILED, UNAVAILABLE, UNREADABLE, UNVERIFIED,
-                                           VERIFIED)
+from eaglegate_sdls_frame_security import (CLEAR, DECRYPTED, FAILED, REFUSED, UNAVAILABLE, UNREADABLE,
+                                           UNVERIFIED, VERIFIED)
 from eaglegate_sdls_tm_frame import (FHP_NO_PACKET_START, FHP_ONLY_IDLE, FRAME_COUNT_MODULO, FrameError,
                                      PrimaryHeader, fecf_ok, parse_tm_frame, read_spi)
 
 COUNTERS = ("frames", "accepted", "rejected", "fecf_errors", "vc_count_gaps", "mc_count_gaps",
-            "replay_rejections", "unverified", "unreadable", "backend_failures")
+            "replay_rejections", "unverified", "unreadable", "backend_failures", "verified", "decrypted",
+            "mac_failures", "backend_refused", "counter_reuse")
 
 
 @dataclass
@@ -48,6 +49,9 @@ class FrameDecision:
     protection: str = None
     data_field: bytes = None       # where packets come from (plaintext)
     verified: bool = False
+    counter_verified: bool = False  # the MAC covered the anti-replay counter
+    key_epoch: str = None          # fingerprints of the key(s) that protected the frame
+    reuse: bool = False            # rejected: a verified frame reused a counter with other content
     gap: bool = False              # the virtual channel frame count skipped
     warnings: list = field(default_factory=list)
 
@@ -126,8 +130,11 @@ class FramePolicy:
             return _reject("sdls", result.detail, header=header, spi=spi, decides_trust=False,
                            quarantine=config.encrypted_without_backend == "deny")
         elif result.status == FAILED:
-            self.counts["backend_failures"] += 1
+            self.counts["mac_failures"] += 1
             return _reject("sdls", f"SDLS check failed for SPI {spi}: {result.detail}", header=header, spi=spi)
+        elif result.status == REFUSED:
+            self.counts["backend_refused"] += 1
+            return _reject("sdls", result.detail, header=header, spi=spi, decides_trust=False)
         elif result.status == UNAVAILABLE:
             self.counts["backend_failures"] += 1
             return _reject("sdls", f"crypto backend unavailable: {result.detail}", header=header, spi=spi,
@@ -136,15 +143,28 @@ class FramePolicy:
             return _reject("sdls", f"crypto backend returned unknown status {result.status!r}", header=header,
                            spi=spi, decides_trust=False)
         decision.verified = result.status in (VERIFIED, DECRYPTED)
+        decision.counter_verified = decision.verified and result.counter_verified
+        decision.key_epoch = result.key_epoch
         decision.protection = result.protection
+        decision.warnings.extend(result.warnings)
         data = result.data_field
-        decision.data_field = data[:len(data) - frame.pad_length] if frame.pad_length else data
+        if frame.pad_length and not result.pad_removed:
+            data = data[:len(data) - frame.pad_length]
+        decision.data_field = data
 
-        replay_problem = self.replay.check(sa, frame, config, verified=decision.verified)
+        reuses = self.replay.reuse_count
+        replay_problem = self.replay.check(sa, frame, config, verified=decision.counter_verified,
+                                           key_epoch=decision.key_epoch)
         if replay_problem:
             self.counts["replay_rejections"] += 1
             self.replay.rejected += 1
-            return _reject("sdls", replay_problem, header=header, spi=spi, decides_trust=False)
+            rejected = _reject("sdls", replay_problem, header=header, spi=spi, decides_trust=False)
+            if self.replay.reuse_count != reuses:
+                self.counts["counter_reuse"] += 1
+                rejected.reuse = True
+            return rejected
+        if result.status in (VERIFIED, DECRYPTED):
+            self.counts["verified" if result.status == VERIFIED else "decrypted"] += 1
 
         if config.frame_counter_gap != "ignore":
             last = self.vc_counts.get(header.vcid)
@@ -167,7 +187,8 @@ class FramePolicy:
         header = decision.header
         self.vc_counts[header.vcid] = header.vc_count
         self.mc_count = header.mc_count
-        self.replay.commit(decision.sa, decision.frame)
+        self.replay.commit(decision.sa, decision.frame, key_epoch=decision.key_epoch,
+                           counter_verified=decision.counter_verified)
 
 
 def _header_problem(header, config):

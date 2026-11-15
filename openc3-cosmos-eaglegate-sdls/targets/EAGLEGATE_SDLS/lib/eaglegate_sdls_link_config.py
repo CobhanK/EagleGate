@@ -23,10 +23,18 @@ together with them. The Security Associations here must MATCH the spacecraft's
     "virtual_channels": {              # by VCID: which SPIs may protect it
       "1": {"spi": [5]}, "5": {"spi": [7]}
     },
+    "crypto": {"backend": "sidecar"},  # Phase 2: NASA CryptoLib in the sidecar container
     ...policy settings, see LINK_SCHEMA...
   }
+
+Key management (EagleGate/DECISIONS.md, SDLS Phase 2): an SA may name the key
+ids it must use (ekid/akid, checked against the sidecar), when its key must be
+replaced (not_after, max_frames) and the link warns when a counter nears the
+end of its range (rekey_warn_percent). EagleGate never holds keys.
 """
+import re
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 
 from eaglegate_rules_error import RulesError
 from eaglegate_validate import require, to_int
@@ -39,7 +47,10 @@ MODES = ("clear", "auth", "enc", "authenc")
 # crypto backend to have verified (and decrypted) the frame.
 PROTECTIONS = ("clear", "auth_unverified", "enc", "auth", "authenc")
 REPLAY_KINDS = ("none", "sn", "iv")
-BACKENDS = ("none",)  # Phase 2 adds "sidecar"
+BACKENDS = ("none", "sidecar")
+DEFAULT_SIDECAR_HOST = "eaglegate-sdls-sidecar"
+DEFAULT_SIDECAR_PORT = 7710
+MAX_KEY_ID = 0xFFFF
 MAX_SPI = 0xFFFF
 MAX_TM_VCID = 7
 MAX_SCID = 0x3FF
@@ -68,6 +79,10 @@ class SaConfig:
     mac_len: int = 0
     replay: str = "none"
     max_forward_jump: int = None  # None: the link's max_forward_jump
+    ekid: int = None              # key ids the sidecar must report for this SA (None: any)
+    akid: int = None
+    not_after: str = None         # ISO 8601 UTC time after which the key is due for replacement
+    max_frames: int = None        # frames accepted under one key before it is due for replacement
 
     @property
     def authenticated(self):
@@ -80,14 +95,28 @@ class SaConfig:
     def overhead(self):
         return SPI_BYTES + self.iv_len + self.sn_len + self.pl_len + self.mac_len
 
+    def counter_width(self):
+        """Bytes of the anti-replay counter (0: none)."""
+        return self.sn_len if self.replay == "sn" else self.iv_len if self.replay == "iv" else 0
+
+    def not_after_time(self):
+        return _parse_time(self.not_after) if self.not_after else None
+
     def describe(self):
         return {"mode": self.mode, "iv_len": self.iv_len, "sn_len": self.sn_len, "pl_len": self.pl_len,
-                "mac_len": self.mac_len, "replay": self.replay, "max_forward_jump": self.max_forward_jump}
+                "mac_len": self.mac_len, "replay": self.replay, "max_forward_jump": self.max_forward_jump,
+                "ekid": self.ekid, "akid": self.akid, "not_after": self.not_after, "max_frames": self.max_frames}
 
 
 @dataclass(frozen=True)
 class CryptoConfig:
     backend: str = "none"
+    host: str = DEFAULT_SIDECAR_HOST
+    port: int = DEFAULT_SIDECAR_PORT
+    timeout_ms: int = 500
+    key_id: str = "default"
+    on_unavailable: str = "deny"
+    test_keys: str = "warn"
 
 
 @dataclass(frozen=True)
@@ -110,6 +139,7 @@ class LinkConfig:
     verified_forward: str = "limit"
     idle: str = "drop"
     untrust_on_first_frame_reject: bool = True
+    rekey_warn_percent: int = 90
     crypto: CryptoConfig = field(default_factory=CryptoConfig)
 
     @property
@@ -153,6 +183,16 @@ SA_SCHEMA = {
             "iv": "the IV must increase (GCM counter IVs)"}),
         "max_forward_jump": {"type": "int", "min": 1, "max": 2**63 - 1,
                              "help": "this SA's limit on how far the counter may jump ahead (default: the link's)"},
+        "ekid": {"type": "int", "min": 0, "max": MAX_KEY_ID,
+                 "help": "encryption key id the crypto backend must use for this SA; a different one stops its "
+                         "frames (empty: any)"},
+        "akid": {"type": "int", "min": 0, "max": MAX_KEY_ID,
+                 "help": "authentication key id the crypto backend must use for this SA (empty: any)"},
+        "not_after": {"type": "string", "allow_empty": True,
+                      "help": "UTC time after which this SA's key is due for replacement, e.g. "
+                              "2027-06-30T00:00:00Z (a warning, frames still pass)"},
+        "max_frames": {"type": "int", "min": 1, "max": 2**63 - 1,
+                       "help": "frames accepted under one key before it is due for replacement (a warning)"},
     },
 }
 SA_SCHEMA["fields"]["mode"]["required"] = True
@@ -219,9 +259,31 @@ LINK_SCHEMA = {
             "help": "when the first frame has the wrong spacecraft ID, virtual channel, SPI or layout, discard "
                     "everything until the interface reconnects or an admin restores trust. Corrupted frames, "
                     "replays and counter gaps never count"},
-        "crypto": {"type": "object", "help": "the crypto backend (Phase 2)", "fields": {
+        "rekey_warn_percent": {"type": "int", "min": 1, "max": 100, "default": 90,
+                               "help": "warn (Keys panel, LINK_STATUS REKEY_DUE) when an SA's anti-replay counter "
+                                       "has used this much of its range: the key must be replaced before the "
+                                       "counter wraps, or IVs repeat"},
+        "crypto": {"type": "object", "help": "the crypto backend", "fields": {
             "backend": _choice(BACKENDS, "none", "who verifies and decrypts frames", {
-                "none": "nobody: authenticated frames stay auth_unverified, encrypted frames unreadable"})}},
+                "none": "nobody: authenticated frames stay auth_unverified, encrypted frames unreadable",
+                "sidecar": "NASA CryptoLib in the eaglegate-sdls-sidecar container (keys stay there)"}),
+            "host": {"type": "string", "default": DEFAULT_SIDECAR_HOST, "help": "the sidecar's host name"},
+            "port": {"type": "int", "min": 1, "max": 65535, "default": DEFAULT_SIDECAR_PORT,
+                     "help": "the sidecar's TCP port"},
+            "timeout_ms": {"type": "int", "min": 10, "max": 10000, "default": 500,
+                           "help": "how long to wait for the sidecar's answer to one frame"},
+            "key_id": {"type": "string", "default": "default",
+                       "help": "id of the channel key (secret EAGLEGATE_SIDECAR_KEY) the sidecar knows it by"},
+            "on_unavailable": _choice(("deny", "unverified"), "deny",
+                                      "frames that arrive while the sidecar cannot be reached", {
+                                          "deny": "reject them (fail closed)",
+                                          "unverified": "treat them as if there were no backend: authenticated "
+                                                        "frames pass as auth_unverified (if unverified_auth "
+                                                        "allows), encrypted frames are unreadable"}),
+            "test_keys": _choice(("warn", "deny"), "warn",
+                                 "an SA whose key the sidecar recognizes as one of CryptoLib's published test keys",
+                                 {"warn": "accept its frames and show a red warning (labs, NOS3)",
+                                  "deny": "reject its frames (operations)"})}},
     },
 }
 
@@ -276,10 +338,7 @@ def parse_link_config(raw, where="link"):
         require(overhead < frame_length, f"{where}: SPI {spi}'s headers and trailers ({overhead} bytes) leave no "
                                          f"room for data in a {frame_length}-byte frame")
 
-    crypto_raw = raw.get("crypto", {})
-    require(isinstance(crypto_raw, dict), f"{where}.crypto must be an object")
-    _no_unknown(crypto_raw, {"backend"}, f"{where}.crypto")
-    crypto = CryptoConfig(backend=_enum(crypto_raw, "backend", BACKENDS, "none", f"{where}.crypto"))
+    crypto = _parse_crypto(raw.get("crypto", {}), f"{where}.crypto")
 
     max_forward_jump = raw.get("max_forward_jump", 1000)
     return LinkConfig(
@@ -292,6 +351,7 @@ def parse_link_config(raw, where="link"):
         verified_forward=_enum(raw, "verified_forward", ("limit", "any"), "limit", where),
         idle=_enum(raw, "idle", ("drop", "keep"), "drop", where),
         untrust_on_first_frame_reject=_bool(raw, "untrust_on_first_frame_reject", True, where),
+        rekey_warn_percent=to_int(raw.get("rekey_warn_percent", 90), f"{where}.rekey_warn_percent", 1, 100),
         crypto=crypto,
         **flags,
     )
@@ -315,10 +375,58 @@ def _parse_sa(spi, raw, where):
         require(lengths["sn_len"] > 0, f"{where}: replay sn needs a sequence number field (sn_len above 0)")
     if replay == "iv":
         require(lengths["iv_len"] > 0, f"{where}: replay iv needs an IV field (iv_len above 0)")
-    jump = raw.get("max_forward_jump")
-    if jump is not None:
-        jump = to_int(jump, f"{where}.max_forward_jump", 1, 2**63 - 1)
-    return SaConfig(spi=spi, mode=mode, replay=replay, max_forward_jump=jump, **lengths)
+    optional = {}
+    for key, top in (("max_forward_jump", 2**63 - 1), ("ekid", MAX_KEY_ID), ("akid", MAX_KEY_ID),
+                     ("max_frames", 2**63 - 1)):
+        value = raw.get(key)
+        if value is not None:
+            optional[key] = to_int(value, f"{where}.{key}", 0 if key.endswith("kid") else 1, top)
+    if optional.get("ekid") is not None:
+        require(mode in ("enc", "authenc"), f"{where}: ekid is for encrypting SAs (mode {mode} does not encrypt)")
+    if optional.get("akid") is not None:
+        require(mode in ("auth", "authenc"), f"{where}: akid is for authenticating SAs (mode {mode} has no MAC)")
+    not_after = raw.get("not_after")
+    if not_after in (None, ""):
+        not_after = None
+    else:
+        require(isinstance(not_after, str) and _parse_time(not_after) is not None,
+                f"{where}.not_after must be a UTC time like 2027-06-30T00:00:00Z, got {not_after!r}")
+    return SaConfig(spi=spi, mode=mode, replay=replay, not_after=not_after, **optional, **lengths)
+
+
+_HOST = re.compile(r"^[A-Za-z0-9]([A-Za-z0-9.\-]{0,252}[A-Za-z0-9])?$")
+_KEY_ID = re.compile(r"^[A-Za-z0-9_.\-]{1,64}$")
+
+
+def _parse_crypto(raw, where):
+    require(isinstance(raw, dict), f"{where} must be an object")
+    _no_unknown(raw, set(LINK_SCHEMA["fields"]["crypto"]["fields"]), where)
+    host = raw.get("host", DEFAULT_SIDECAR_HOST)
+    require(isinstance(host, str) and _HOST.match(host), f"{where}.host must be a host name, got {host!r}")
+    key_id = raw.get("key_id", "default")
+    require(isinstance(key_id, str) and _KEY_ID.match(key_id),
+            f"{where}.key_id must be 1-64 letters, digits, '.', '_' or '-'")
+    return CryptoConfig(
+        backend=_enum(raw, "backend", BACKENDS, "none", where), host=host,
+        port=to_int(raw.get("port", DEFAULT_SIDECAR_PORT), f"{where}.port", 1, 65535),
+        timeout_ms=to_int(raw.get("timeout_ms", 500), f"{where}.timeout_ms", 10, 10000), key_id=key_id,
+        on_unavailable=_enum(raw, "on_unavailable", ("deny", "unverified"), "deny", where),
+        test_keys=_enum(raw, "test_keys", ("warn", "deny"), "warn", where))
+
+
+def _parse_time(text):
+    """UTC datetime for an ISO 8601 time ending in Z (or a date), else None."""
+    if not isinstance(text, str):
+        return None
+    value = text.strip()
+    try:
+        if len(value) == 10:
+            return datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        if not value.endswith("Z"):
+            return None
+        return datetime.fromisoformat(value[:-1]).replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
 
 
 def _no_unknown(obj, allowed, where):

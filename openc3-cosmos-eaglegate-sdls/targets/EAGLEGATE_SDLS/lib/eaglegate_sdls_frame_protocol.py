@@ -9,7 +9,7 @@ packets for it:
   bytes -> eaglegate_sdls_sync          find the ASM, cut fixed-length frames
         -> (derandomize, if configured)
         -> eaglegate_sdls_policy        header, SPI binding, crypto, anti-replay, counts
-           (eaglegate_sdls_frame_security: Phase 1 NoCrypto, Phase 2 CryptoLib sidecar)
+           (eaglegate_sdls_frame_security: NoCrypto, or NASA CryptoLib in the sidecar container)
         -> eaglegate_sdls_reassembler   packets out of data fields, across frames
         -> ONE packet per read_data call, with link values in `extra`
         -> EaglegateFirewallProtocol    packet rules (may match "link": vcid, spi, protection)
@@ -49,6 +49,7 @@ from openc3.interfaces.protocols.protocol import Protocol
 from openc3.utilities.logger import Logger
 
 from eaglegate_sdls_frame_security import make_backend
+from eaglegate_sdls_keys import KeyWatch, summary_counts
 from eaglegate_sdls_link_config import LINK_KEYS, LINK_SCHEMA, parse_link_config
 from eaglegate_sdls_policy import FramePolicy
 from eaglegate_sdls_reassembler import FrameInfo, Reassembler, link_values
@@ -57,7 +58,7 @@ from eaglegate_sdls_status import LinkStatusPublisher
 from eaglegate_sdls_sync import FrameSync
 from eaglegate_sdls_tm_frame import derandomize
 
-SDLS_VERSION = "0.1.0"
+SDLS_VERSION = "0.2.0"
 FIREWALL_API_VERSIONS = (1, 1)   # EagleGate core firewall API versions this plugin works with
 MODES = ("enforce", "monitor")
 STATUS_INTERVAL = 1.0
@@ -83,12 +84,29 @@ RESET_REPLAY = {
 PANELS = (
     {"title": "Link", "kind": "values", "path": "overview",
      "items": {"mode": "Mode", "crypto_backend": "Crypto backend", "in_lock": "Frame sync",
-               "would_untrust": "Would untrust (monitor)"}},
+               "would_untrust": "Would untrust (monitor)", "rekey_due": "Keys due for replacement",
+               "test_keys": "SAs on TEST KEYS"}},
     {"title": "Frames", "kind": "values", "path": "frames",
      "items": {"frames": "Received", "accepted": "Accepted", "rejected": "Rejected",
                "fecf_errors": "FECF errors", "vc_count_gaps": "VC count gaps", "mc_count_gaps": "MC count gaps",
                "replay_rejections": "Replay rejections", "unverified": "MAC not checked",
-               "unreadable": "Not decrypted", "backend_failures": "Backend failures"}},
+               "unreadable": "Not decrypted", "verified": "MAC verified (CryptoLib)",
+               "decrypted": "Decrypted (CryptoLib)", "mac_failures": "Refused by CryptoLib",
+               "backend_refused": "Refused (SA mismatch / test key)", "backend_failures": "Backend unavailable",
+               "counter_reuse": "Counter reuse (key holder)"}},
+    {"title": "Crypto backend", "kind": "values", "path": "crypto",
+     "help": "NASA CryptoLib in the eaglegate-sdls-sidecar container (link.crypto.backend sidecar). Keys stay "
+             "there; EagleGate sees only their fingerprints.",
+     "items": {"backend": "Backend", "connected": "Connected", "cryptolib": "CryptoLib", "sidecar": "Sidecar",
+               "key_source": "Key source", "sa_match": "SA table matches the rules", "mismatch": "Differences",
+               "test_key_spis": "SPIs on TEST KEYS", "latency_ms": "Latency (ms)", "last_error": "Last error"}},
+    {"title": "Keys", "kind": "table", "path": "keys", "key_title": "SPI",
+     "help": "Which key protects each SA (ids and SHA-256 fingerprints from the sidecar) and whether it is due "
+             "for replacement: counter near the end of its range (rekey_warn_percent), past not_after, or "
+             "max_frames reached. A new key starts a new anti-replay baseline.",
+     "columns": {"mode": "Mode", "ekid": "EKID", "akid": "AKID", "fingerprints": "Fingerprints",
+                 "test_key": "TEST KEY", "mask_covers_data": "MAC covers data", "counter_used": "Counter used",
+                 "frames": "Frames under key", "not_after": "Not after", "due": "Due for replacement"}},
     {"title": "Packets from frames", "kind": "values", "path": "packets",
      "items": {"packets_seen": "Reassembled", "packets_out": "Passed to the firewall",
                "reassembly_drops": "Reassembly drops", "dropped_quietly": "Frames dropped (count only)",
@@ -98,7 +116,8 @@ PANELS = (
     {"title": "Anti-replay counters", "kind": "table", "path": "replay.counters", "key_title": "SPI",
      "help": "The last accepted counter of each security association (kept in Valkey across restarts). "
              "Empty: no baseline, the next frame sets it (or an admin floor, with replay_baseline require).",
-     "columns": {"kind": "Counter", "value": "Last accepted", "floor": "Floor", "updated": "Updated"},
+     "columns": {"kind": "Counter", "value": "Last accepted", "floor": "Floor", "key": "Key epoch",
+                 "frames": "Frames under key", "updated": "Updated"},
      "row_actions": [{"action": "reset_replay", "title": "Reset", "row_param": "spi"}],
      "actions": [{"action": "reset_replay", "title": "Reset a counter"},
                  {"action": "reset_replay", "title": "Reset all", "params": {"spi": "all"}}]},
@@ -148,6 +167,9 @@ class EaglegateSdlsFrameProtocol(Protocol):
         self.status = None
         self.status_due = False
         self.status_sent_at = None
+        self.keys = KeyWatch()
+        self.logged_warnings = set()
+        self.new_keys_logged = 0
 
     # ---- what the core firewall sees -----------------------------------------
 
@@ -196,10 +218,21 @@ class EaglegateSdlsFrameProtocol(Protocol):
     def _frame(self, firewall, config, frame, cadu):
         raw = derandomize(frame) if config.randomized else frame
         decision = self.policy.check(raw, config, self.backend)
+        for text in decision.warnings:
+            if text not in self.logged_warnings and len(self.logged_warnings) < 100:
+                self.logged_warnings.add(text)
+                Logger.warn(f"{self._name()} SDLS: {text}")
         if not decision.accepted:
+            if decision.reuse:
+                Logger.error(f"{self._name()} SDLS: {decision.reason}")
             self._reject_frame(firewall, config, decision, cadu)
             return
         self.policy.commit(decision)
+        if self.replay.new_keys != self.new_keys_logged:
+            self.new_keys_logged = self.replay.new_keys
+            Logger.info(f"{self._name()} SDLS: SPI {decision.spi} is protected by a new key ({decision.key_epoch}); "
+                        "its anti-replay counter starts a new baseline")
+            self.status_due = True
         self.first_frame_decided = True
         header = decision.header
         info = FrameInfo(vcid=header.vcid, spi=decision.spi, protection=decision.protection,
@@ -309,7 +342,9 @@ class EaglegateSdlsFrameProtocol(Protocol):
             if old is None or old.crypto != config.crypto:
                 if self.backend:
                     self.backend.close()
-                self.backend = make_backend(config.crypto)
+                self.backend = make_backend(config.crypto, config, self._name())
+            else:
+                self.backend.configure(config)
             max_packet = getattr(firewall, "fw_max_length", DEFAULT_MAX_PACKET)
             if self.reassembler is None:
                 self.reassembler = Reassembler(max_packet, keep_idle=config.idle == "keep")
@@ -426,9 +461,17 @@ class EaglegateSdlsFrameProtocol(Protocol):
         self.status_sent_at = now
         self.status_due = not self.status.publish(self.status_items())
 
+    def _key_rows(self):
+        rows = self.keys.rows(self.config, self.backend, self.replay)
+        for spi, text in self.keys.new_warnings(rows):
+            Logger.warn(f"{self._name()} SDLS: SPI {spi} {text}")
+        return rows
+
     def status_items(self):
         """LINK_STATUS item values (see cmd_tlm/tlm.txt)."""
         counts = self.policy.counts
+        crypto = self.backend.status() if self.backend else {}
+        keys = summary_counts(self._key_rows())
         last = self.last_rejection or {}
         sync = self.sync
         reassembler = self.reassembler
@@ -457,16 +500,29 @@ class EaglegateSdlsFrameProtocol(Protocol):
             "LAST_SPI": -1 if last.get("spi") is None else last["spi"],
             "LAST_LAYER": last.get("layer") or "",
             "LAST_REASON": last.get("reason") or "",
+            "VERIFIED_FRAMES": _u32(counts["verified"]),
+            "DECRYPTED_FRAMES": _u32(counts["decrypted"]),
+            "MAC_FAILURES": _u32(counts["mac_failures"]),
+            "BACKEND_REFUSED": _u32(counts["backend_refused"]),
+            "BACKEND_UNAVAILABLE": _u32(counts["backend_failures"]),
+            "COUNTER_REUSE": _u32(counts["counter_reuse"]),
+            "SIDECAR_UP": 2 if crypto.get("backend") != "sidecar" else (1 if crypto.get("connected") else 0),
+            "SIDECAR_LATENCY_MS": float(crypto.get("latency_ms") or 0.0),
+            "REKEY_DUE": keys["rekey_due"],
+            "TEST_KEYS": keys["test_keys"],
+            "NEW_KEYS": _u32(self.replay.new_keys),
         }
 
     def read_details(self):
         result = super().read_details()
+        keys = self._key_rows()
         result[EXTENSION.details_key] = {
             "version": SDLS_VERSION,
             "mode": self.mode,
             "firewall_error": self.firewall_error,
             "overview": {"mode": self.mode, "crypto_backend": self.backend.name if self.backend else None,
-                         "in_lock": self.sync.in_lock if self.sync else None, "would_untrust": self.would_untrust},
+                         "in_lock": self.sync.in_lock if self.sync else None, "would_untrust": self.would_untrust,
+                         **summary_counts(keys)},
             "config": self.config.summary() if self.config else None,
             "crypto": self.backend.status() if self.backend else None,
             "frames": dict(self.policy.counts),
@@ -479,9 +535,11 @@ class EaglegateSdlsFrameProtocol(Protocol):
             "first_frame_decided": self.first_frame_decided,
             "would_untrust": self.would_untrust,
             "replay": {"counters": self._replay_counters(), "rejected": self.replay.rejected,
-                       "resets": self.replay.resets,
+                       "resets": self.replay.resets, "new_keys": self.replay.new_keys,
+                       "counter_reuse": self.replay.reuse_count, "last_reuse": self.replay.last_reuse,
                        "store": self.replay.store.summary() if self.replay.store else None},
             "frame_counts": {str(vcid): count for vcid, count in sorted(self.policy.vc_counts.items())},
+            "keys": keys,
             "recent": list(reversed(self.recent)),
             "status_packet": {"published": self.status.published if self.status else 0,
                               "errors": self.status.errors if self.status else 0},
@@ -496,7 +554,8 @@ class EaglegateSdlsFrameProtocol(Protocol):
         config = firewall.ruleset.extensions.get(EXTENSION.section) if firewall else None  # the running rules
         for spi, sa in sorted(config.sas.items()) if config else ():
             if sa.replay != "none":
-                counters.setdefault(str(spi), {"kind": sa.replay, "value": None, "floor": None, "updated": ""})
+                counters.setdefault(str(spi), {"kind": sa.replay, "value": None, "floor": None, "updated": "",
+                                               "key": None, "frames": 0})
         return dict(sorted(counters.items(), key=lambda item: int(item[0])))
 
     def _name(self):

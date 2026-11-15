@@ -6,7 +6,7 @@ Third-party dependencies of both plugins, with the versions in use. Update this 
 
 **Policy:** add a package only when writing the code ourselves would be clearly worse. Every package, including its transitive dependencies, adds supply chain attack surface. Prefer the standard library, the browser, and what COSMOS already provides.
 
-Last updated: 2026-11-09
+Last updated: 2026-11-15
 
 ## openc3-cosmos-eaglegate (core plugin)
 
@@ -68,7 +68,21 @@ The lockfile resolves 301 packages in total, including transitive ones. Tests us
 | Python dev | Same as the core: pytest, hypothesis, ruff |
 | JavaScript | None (no tool page yet) |
 
-**Planned for Phase 2 (not added yet):** NASA CryptoLib (NOSA 1.3) and libgcrypt, inside a separate sidecar container rather than in the plugin.
+The plugin's sidecar client (`eaglegate_sdls_sidecar_backend.py`) and wire protocol use only the standard library (`hmac`, `hashlib`, `secrets`, `socket`).
+
+## eaglegate-sdls-sidecar (CryptoLib container, Phase 2)
+
+| Component | Version | License | Why |
+|---|---|---|---|
+| NASA CryptoLib | v1.5.1, commit `5b98c8b2561b22822a9d4e26c959677ed93c815a` (checked at build time) | NOSA 1.3 | All SDLS cryptography. Built from source with `KEY_INTERNAL`, `SA_INTERNAL`, `MC_DISABLED` and `CRYPTO_LIBGCRYPT`, using upstream's flags |
+| libgcrypt | 1.10.1-3+deb12u1 (Debian bookworm) | LGPL-2.1+ | CryptoLib's crypto backend |
+| libgpg-error | 1.46-1 (Debian bookworm) | LGPL-2.1+ | Needed by libgcrypt |
+| Base image | `python:3.12-slim-bookworm@sha256:935c3c5b…03df` (Python 3.12.16, Debian 12.15) | PSF, Debian | Runtime. Pinned by digest |
+| Build stage only | build-essential, cmake, git (Debian bookworm) | various | Compile CryptoLib and the shim. Not in the runtime image |
+
+The sidecar's Python code uses only the standard library. Its tests use `unittest` in the image, and pytest in the dev venv.
+
+**Version rule:** v1.5.2 (2026-11-04) is the latest release. It was skipped because it was less than two weeks old when pinned (DECISIONS.md D7). Re-check, then bump `CRYPTOLIB_TAG` and `CRYPTOLIB_COMMIT` in the Dockerfile.
 
 ## Not packages, but trusted at runtime
 

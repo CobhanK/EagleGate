@@ -11,6 +11,13 @@ DEST="$DEST_PARENT/openc3-cosmos-eaglegate"
 # The SDLS extension plugin (needs the core plugin installed first)
 SDLS_SRC="$SCRIPT_DIR/openc3-cosmos-eaglegate-sdls"
 SDLS_DEST="$DEST_PARENT/openc3-cosmos-eaglegate-sdls"
+# The CryptoLib sidecar (a Docker image next to COSMOS, not a plugin)
+SIDECAR_DIR="$SCRIPT_DIR/eaglegate-sdls-sidecar"
+SIDECAR_IMAGE="${SIDECAR_IMAGE:-eaglegate-sdls-sidecar:latest}"
+SIDECAR_NAME="${SIDECAR_NAME:-eaglegate-sdls-sidecar}"
+SIDECAR_NETWORK="${SIDECAR_NETWORK:-cosmos_default}"   # COSMOS's docker network
+SIDECAR_KEY_FILE="${SIDECAR_KEY_FILE:-$SIDECAR_DIR/secrets/channel.key}"
+SIDECAR_CONFIG="${SIDECAR_CONFIG:-$SIDECAR_DIR/config/nos3.json}"
 
 # echo $SCRIPT_DIR
 # echo $SRC
@@ -22,7 +29,7 @@ if [[ ! -d "$SRC" ]]; then
     exit 1
 fi
 
-if [[ ! -d "$DEST_PARENT" ]]; then
+if [[ ! -d "$DEST_PARENT" && "${1:-}" != *sidecar* ]]; then
     echo "Error: cosmos not found in the parent directory ($DEST_PARENT)" >&2
     exit 1
 fi
@@ -83,6 +90,45 @@ case "$COMMAND" in
         build_plugin "$SRC" "$DEST"
         build_plugin "$SDLS_SRC" "$SDLS_DEST"
         ;;
+    build-sidecar)
+        docker build -f "$SIDECAR_DIR/Dockerfile" --target runtime -t "$SIDECAR_IMAGE" "$SCRIPT_DIR"
+        ;;
+    test-sidecar)
+        # The sidecar's tests against the real CryptoLib (test image only)
+        docker build -f "$SIDECAR_DIR/Dockerfile" --target test -t eaglegate-sdls-sidecar:test "$SCRIPT_DIR"
+        docker run --rm eaglegate-sdls-sidecar:test
+        ;;
+    sidecar-key)
+        # A new channel key (EagleGate <-> sidecar). Never committed (secrets/ is ignored).
+        if [[ -f "$SIDECAR_KEY_FILE" ]]; then
+            echo "Error: $SIDECAR_KEY_FILE exists; delete it first to replace the key" >&2
+            exit 1
+        fi
+        mkdir -p "$(dirname "$SIDECAR_KEY_FILE")"
+        (umask 077 && python3 -c "import secrets; print(secrets.token_hex(32))" > "$SIDECAR_KEY_FILE")
+        echo "Wrote a 32-byte channel key to $SIDECAR_KEY_FILE"
+        echo "Put the same hex value in the COSMOS secret EAGLEGATE_SIDECAR_KEY (Admin Console > Secrets)"
+        echo "and enable 'SECRET ENV EAGLEGATE_SIDECAR_KEY ...' in the SDLS plugin's plugin.txt"
+        ;;
+    run-sidecar)
+        if [[ ! -f "$SIDECAR_KEY_FILE" ]]; then
+            echo "Error: no channel key at $SIDECAR_KEY_FILE; run '$0 sidecar-key' first" >&2
+            exit 1
+        fi
+        docker rm -f "$SIDECAR_NAME" >/dev/null 2>&1 || true
+        # Read-only root, no capabilities, scratch dir in tmpfs (CryptoLib writes
+        # sa_save_file.bin there at start), on COSMOS's network only (no port published)
+        docker run -d --name "$SIDECAR_NAME" --network "$SIDECAR_NETWORK" --restart unless-stopped \
+            --read-only --tmpfs /var/lib/eaglegate-sidecar:uid=10001,gid=10001,mode=0700,size=1m \
+            --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 256m \
+            -v "$SIDECAR_KEY_FILE:/run/secrets/eaglegate_sidecar_key:ro" \
+            -v "$SIDECAR_CONFIG:/etc/eaglegate-sidecar/sidecar.json:ro" \
+            "$SIDECAR_IMAGE"
+        echo "Started $SIDECAR_NAME on network $SIDECAR_NETWORK (config $SIDECAR_CONFIG); logs: docker logs $SIDECAR_NAME"
+        ;;
+    stop-sidecar)
+        docker rm -f "$SIDECAR_NAME"
+        ;;
     clean)
         clean_plugin "$DEST"
         clean_plugin "$SDLS_DEST"
@@ -112,10 +158,15 @@ case "$COMMAND" in
         echo "build-sdls [-v 1.x.x] : the same for the SDLS extension plugin (install the core plugin first)"
         echo "build-all [-v 1.x.x]  : builds both plugins"
         echo "clean : removes eaglegate and eaglegate-sdls from cosmos folder"
-        echo "run|stop : starts or stops openc3 cosmos containers on local"  
+        echo "run|stop : starts or stops openc3 cosmos containers on local"
+        echo "build-sidecar  : builds the CryptoLib sidecar image ($SIDECAR_IMAGE)"
+        echo "test-sidecar   : runs the sidecar's tests against the real CryptoLib"
+        echo "sidecar-key    : creates the EagleGate <-> sidecar channel key ($SIDECAR_KEY_FILE)"
+        echo "run-sidecar|stop-sidecar : starts or stops the sidecar on $SIDECAR_NETWORK"
+        echo "                 (SIDECAR_CONFIG=... picks the SA configuration, default config/nos3.json)"
     ;;
     *)
-        echo "Usage: $0 {build|build-sdls|build-all [-v 1.x.x]|clean|run|stop|help}" >&2
+        echo "Usage: $0 {build|build-sdls|build-all [-v 1.x.x]|clean|run|stop|build-sidecar|test-sidecar|sidecar-key|run-sidecar|stop-sidecar|help}" >&2
         exit 1
         ;;
 esac
