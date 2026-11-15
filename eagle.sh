@@ -69,6 +69,12 @@ build_plugin() {
     (cd "$dest" && ../openc3.sh cli rake build VERSION="$VERSION")
 }
 
+# The CryptoLib sidecar's Docker image (not a gem: started with run-sidecar)
+build_sidecar() {
+    docker build -f "$SIDECAR_DIR/Dockerfile" --target runtime -t "$SIDECAR_IMAGE" "$SCRIPT_DIR"
+    echo "Built the sidecar image $SIDECAR_IMAGE"
+}
+
 clean_plugin() {
     local dest="$1"
     if [[ -d "$dest" ]]; then
@@ -80,18 +86,23 @@ clean_plugin() {
 }
 
 case "$COMMAND" in
-    build)
+    build-core)
         build_plugin "$SRC" "$DEST"
         ;;
     build-sdls)
         build_plugin "$SDLS_SRC" "$SDLS_DEST"
         ;;
-    build-all)
+    build-core-sdls)
         build_plugin "$SRC" "$DEST"
         build_plugin "$SDLS_SRC" "$SDLS_DEST"
         ;;
+    build-all)
+        build_plugin "$SRC" "$DEST"
+        build_plugin "$SDLS_SRC" "$SDLS_DEST"
+        build_sidecar
+        ;;
     build-sidecar)
-        docker build -f "$SIDECAR_DIR/Dockerfile" --target runtime -t "$SIDECAR_IMAGE" "$SCRIPT_DIR"
+        build_sidecar
         ;;
     test-sidecar)
         # The sidecar's tests against the real CryptoLib (test image only)
@@ -153,20 +164,21 @@ case "$COMMAND" in
         ;;
     help)
         echo "Assuming cosmos is in the same folder as EagleGate:"
-        echo "build [-v 1.x.x] : copies eaglegate into cosmos folder (deletes if exists there already)"
-        echo "                   and builds the plugin gem (version defaults to $VERSION)"
-        echo "build-sdls [-v 1.x.x] : the same for the SDLS extension plugin (install the core plugin first)"
-        echo "build-all [-v 1.x.x]  : builds both plugins"
+        echo "build-core [-v 1.x.x]      : copies the core firewall plugin into the cosmos folder (replacing"
+        echo "                             an old copy) and builds its gem (version defaults to $VERSION)"
+        echo "build-sdls [-v 1.x.x]      : the same for the SDLS plugin only (install the core plugin first)"
+        echo "build-core-sdls [-v 1.x.x] : both plugin gems, no sidecar"
+        echo "build-all [-v 1.x.x]       : both plugin gems and the sidecar image (needs Docker)"
         echo "clean : removes eaglegate and eaglegate-sdls from cosmos folder"
         echo "run|stop : starts or stops openc3 cosmos containers on local"
-        echo "build-sidecar  : builds the CryptoLib sidecar image ($SIDECAR_IMAGE)"
+        echo "build-sidecar  : builds only the CryptoLib sidecar image ($SIDECAR_IMAGE)"
         echo "test-sidecar   : runs the sidecar's tests against the real CryptoLib"
         echo "sidecar-key    : creates the EagleGate <-> sidecar channel key ($SIDECAR_KEY_FILE)"
         echo "run-sidecar|stop-sidecar : starts or stops the sidecar on $SIDECAR_NETWORK"
         echo "                 (SIDECAR_CONFIG=... picks the SA configuration, default config/nos3.json)"
     ;;
     *)
-        echo "Usage: $0 {build|build-sdls|build-all [-v 1.x.x]|clean|run|stop|build-sidecar|test-sidecar|sidecar-key|run-sidecar|stop-sidecar|help}" >&2
+        echo "Usage: $0 {build-core|build-sdls|build-core-sdls|build-all [-v 1.x.x]|clean|run|stop|build-sidecar|test-sidecar|sidecar-key|run-sidecar|stop-sidecar|help}" >&2
         exit 1
         ;;
 esac

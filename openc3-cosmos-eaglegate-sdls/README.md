@@ -49,7 +49,7 @@ Design decisions and findings are in [../DECISIONS.md](../DECISIONS.md).
 ## Install
 
 1. Install `openc3-cosmos-eaglegate` (the core firewall).
-2. Build this plugin: `./eagle.sh build-sdls -v x.y.z` from the repository root (or `build-all` for both).
+2. Build this plugin: `./eagle.sh build-sdls -v x.y.z` from the repository root (or `build-core-sdls` for both plugins, `build-all` for both plugins and the sidecar image).
 3. Install the gem under Admin > Plugins and set the variables:
 
 | Variable | Default | Meaning |
