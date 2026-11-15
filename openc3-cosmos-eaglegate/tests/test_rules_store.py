@@ -54,6 +54,7 @@ def test_keys_are_outside_targets_modified():
         "pending": "DEFAULT/eaglegate/EAGLEGATE/rules_pending.json",
         "active": "DEFAULT/eaglegate/EAGLEGATE/rules_active.json",
         "history": "DEFAULT/eaglegate/EAGLEGATE/history/",
+        "requests": "DEFAULT/eaglegate/EAGLEGATE/requests/",
     }
     assert not any("targets_modified" in key or key.split("/")[1] == "tmp" for key in keys.values())
 

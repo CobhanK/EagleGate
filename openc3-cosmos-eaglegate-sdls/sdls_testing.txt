@@ -1,0 +1,62 @@
+EagleGate SDLS - new features to test live (COSMOS + NOS3)
+==========================================================
+
+Setup
+-----
+- Install the core plugin first, then the SDLS plugin. Both should install without errors.
+- Install with MAP_TLM_TARGET <core> DISABLED and confirm nothing breaks.
+- Run the NOS3 radio sim over UDP (TCP_GROUND=0); frames arrive on EAGLEGATE_SDLS_INT.
+- Check the shipped link section against real NOS3 frames: the clear SA's 12-byte IV field
+  and the auth SA's 2-byte SN + 16-byte MAC.
+
+SDLS frame layer
+----------------
+- Monitor mode: frames are counted and LINK_STATUS updates, but no packets reach COSMOS.
+- Enforce mode: NOS3 packets come out with link values (vcid, spi, protection) and are identified.
+- Packets that span frames are reassembled correctly.
+- Idle packets and idle-only frames are dropped quietly.
+- Wrong SCID, wrong VCID or wrong SPI on a VC (e.g. clear SPI 5 on auth VC 5) is rejected and
+  quarantined (stage LINK).
+- Rejected first frame -> connection untrusted. The untrust_on_first_frame_reject toggle turns this off.
+- Replayed frame is rejected; anti-replay counters survive a COSMOS restart.
+- Lost frame (VC count gap) -> warning plus a reassembly drop; packets resume afterwards.
+- Encrypted VC 4 frames are rejected (or counted only, with encrypted_without_backend=drop).
+- Garbage bytes between frames are skipped and quarantined; sync is regained.
+- RESET_REPLAY from the Link status tab: row Reset (relearn), with a floor, Reset all, Reset a counter
+  for an SPI with no baseline yet, and refusals (bad SPI, floor too big). Each shows under Admin actions.
+- LINK_STATUS and FIREWALL_STATUS values (incl. DENIED_LINK) match what happened; screens render.
+
+CryptoLib sidecar (Phase 2)
+---------------------------
+- ./eagle.sh build-sidecar, test-sidecar (all tests pass against the real CryptoLib), sidecar-key, run-sidecar.
+- COSMOS secret EAGLEGATE_SIDECAR_KEY = the key file's hex; SECRET ENV line enabled; plugin reinstalled.
+- Rules page, link section: crypto.backend sidecar. Link status tab: Crypto backend panel shows connected,
+  CryptoLib 1.5.1, SA table matches, latency; LINK_STATUS SIDECAR_UP = UP.
+- Keys panel: SPI 6 and 7 show key ids, fingerprints and TEST KEY (red, TEST_KEYS = 2); SPI 7 shows
+  "MAC covers data: no" (NOS3's zero mask) and its frames stay auth_unverified.
+- TO_SET_VCID_CC to VC4 (SPI 6): packets decrypt (protection enc, DECRYPTED_FRAMES rises); a rule denying
+  protection "enc" blocks them.
+- With "abm": "ones" on both the spacecraft SA and config/nos3.json SPI 7: protection auth, VERIFIED_FRAMES
+  rises; a flipped bit is refused by CryptoLib (MAC_FAILURES).
+- docker stop the sidecar: frames rejected as unavailable (deny) or auth_unverified/unreadable
+  (on_unavailable unverified); SIDECAR_UP = DOWN; it reconnects by itself after a restart.
+- Wrong channel key in COSMOS: nothing verifies, last error says the hello failed authentication.
+- Rules ekid/akid that differ from the sidecar: that SPI's frames refused (BACKEND_REFUSED), Differences shown.
+- test_keys deny: SPI 6/7 frames refused.
+- Restart the sidecar with another key for an SA: NEW_KEYS rises, the anti-replay counter relearns.
+- rekey_warn_percent / not_after / max_frames: the Keys panel shows "Due for replacement", REKEY_DUE > 0.
+
+Core plugin (new)
+-----------------
+- Rules page: interface selector lists EAGLEGATE_INT and EAGLEGATE_SDLS_INT, each with its own rules.
+- Link status tab: packets/s, allowed and rejected counts, and per-APID rows match the traffic sent. Sequence gaps
+  appear when NOS3 packets are lost or blocked. The SDLS panels (frames, virtual channels, anti-replay counters)
+  update every 2 s. Action buttons are hidden for non-admins (Enterprise).
+- FIREWALL_STATUS PACKETS / ALLOWED / SEQ_GAPS update while telemetry flows (screen "Traffic" box).
+- Rules page: the "link" section form edits, validates, diffs and applies with RELOAD_RULES.
+- Link conditions in the rule editor (e.g. deny protection "clear").
+- Settings switch untrust_on_first_packet_reject.
+- Restore trust button: resumes an untrusted connection without reconnecting; audit entry written.
+- Restore trust / RESET_REPLAY refused for non-admins (Enterprise), expired or reused requests.
+- interface_warning appears if a TCP server interface is used.
+- Rules signing still works with a link section present.

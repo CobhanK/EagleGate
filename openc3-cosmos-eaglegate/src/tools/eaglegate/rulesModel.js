@@ -113,6 +113,43 @@ function checkValue(spec, value, where, errors) {
         checkObject(spec.fields, item, `${where}[${i}]`, errors),
       )
       return
+    case 'enum_list':
+      if (!Array.isArray(value) || value.length === 0)
+        return errors.push(`${where} must be a non-empty list`)
+      value.forEach((v, i) =>
+        checkValue({ ...spec, type: 'enum' }, v, `${where}[${i}]`, errors),
+      )
+      return
+    case 'object':
+      checkObject(spec.fields || {}, value, where, errors)
+      return
+    case 'map': {
+      if (value === null || typeof value !== 'object' || Array.isArray(value))
+        return errors.push(`${where} must be an object`)
+      for (const [key, item] of Object.entries(value)) {
+        checkValue(
+          spec.key || { type: 'string' },
+          key,
+          `${where} key '${key}'`,
+          errors,
+        )
+        checkValue(spec.value, item, `${where}.${key}`, errors)
+      }
+      return
+    }
+    case 'link_match': {
+      const keys = spec.keys || {}
+      if (!Object.keys(keys).length)
+        return errors.push(
+          `${where}: no extension on this interface provides link information`,
+        )
+      if (value === null || typeof value !== 'object' || Array.isArray(value))
+        return errors.push(`${where} must be an object`)
+      if (!Object.keys(value).length)
+        return errors.push(`${where} must be a non-empty object`)
+      checkObject(keys, value, where, errors)
+      return
+    }
     case 'byte_checks':
       if (!Array.isArray(value) || value.length === 0)
         return errors.push(`${where} must be a non-empty list`)
@@ -126,6 +163,13 @@ function checkValue(spec, value, where, errors) {
       })
       return
   }
+}
+
+// Problems with a plain form's values (e.g. an extension action's params), [] if none
+export function checkFields(specs, obj, where) {
+  const errors = []
+  checkObject(specs, obj, where, errors)
+  return errors
 }
 
 function checkObject(specs, obj, where, errors) {
@@ -157,6 +201,12 @@ function enabled(rule) {
 // parser's checks). An empty list does not guarantee acceptance.
 export function validate(doc, schema) {
   const errors = []
+  if (doc.settings !== undefined)
+    checkObject(schema.settings || {}, doc.settings, 'settings', errors)
+  for (const [section, extension] of Object.entries(schema.extensions || {})) {
+    if (doc[section] !== undefined && extension.schema?.type)
+      checkValue(extension.schema, doc[section], section, errors)
+  }
   const allowedTop = new Set(schema.top_level_keys)
   for (const key of Object.keys(doc)) {
     if (!allowedTop.has(key)) errors.push(`top level has unknown key '${key}'`)
@@ -386,6 +436,47 @@ export function warnings(doc, schema, running) {
   return result
 }
 
+// ---- extensions ----------------------------------------------------------------
+
+// The schema for one interface: the static core schema plus what the
+// extensions running on that interface add (interface_details firewall.extensions,
+// see eaglegate_extensions.py): their rules sections and the keys of match.link.
+export function withExtensions(schema, extensions) {
+  const result = clone(schema)
+  const linkKeys = {}
+  for (const extension of Object.values(extensions || {}))
+    Object.assign(linkKeys, extension.link_keys || {})
+  result.extensions = clone(extensions || {})
+  result.top_level_keys = [
+    ...schema.top_level_keys,
+    ...Object.keys(extensions || {}),
+  ]
+  result.match.keys.link = { ...schema.match.keys.link, keys: linkKeys }
+  return result
+}
+
+// A setting's value as the firewall will use it (the file may leave it out)
+export function settingValue(doc, schema, key) {
+  const value = doc.settings?.[key]
+  return value === undefined ? schema.settings[key].default : value
+}
+
+// Write a setting, leaving defaults out of the file so diffs stay small
+export function setSetting(doc, schema, key, value) {
+  const settings = { ...(doc.settings || {}) }
+  if (value === schema.settings[key].default) delete settings[key]
+  else settings[key] = value
+  if (Object.keys(settings).length) doc.settings = settings
+  else delete doc.settings
+}
+
+// "link vcid 4, 5; protection auth" for the rules table
+export function linkSummary(link) {
+  return Object.entries(link || {})
+    .map(([key, values]) => `link ${key} ${[].concat(values).join(', ')}`)
+    .join('; ')
+}
+
 // ---- editing helpers ---------------------------------------------------------
 
 // Deep copy that also works on Vue's reactive proxies (structuredClone does not)
@@ -470,4 +561,45 @@ export function lineDiff(before, after) {
   while (i < a.length) out.push({ op: '-', line: a[i++] })
   while (j < b.length) out.push({ op: '+', line: b[j++] })
   return out
+}
+
+// The diff rows to show: changed lines with `context` unchanged lines around
+// them; longer unchanged runs become one { op: '…', line: 'N unchanged lines' }
+export function compactDiff(rows, context = 3) {
+  const keep = rows.map(() => false)
+  rows.forEach((row, i) => {
+    if (row.op === ' ') return
+    for (
+      let k = Math.max(0, i - context);
+      k <= Math.min(rows.length - 1, i + context);
+      k++
+    )
+      keep[k] = true
+  })
+  const out = []
+  let skipped = 0
+  const flush = () => {
+    if (skipped)
+      out.push({
+        op: '…',
+        line: `${skipped} unchanged line${skipped === 1 ? '' : 's'}`,
+      })
+    skipped = 0
+  }
+  rows.forEach((row, i) => {
+    if (keep[i]) {
+      flush()
+      out.push(row)
+    } else skipped++
+  })
+  flush()
+  return out
+}
+
+// { added, removed } line counts of a diff
+export function diffStats(rows) {
+  return {
+    added: rows.filter((r) => r.op === '+').length,
+    removed: rows.filter((r) => r.op === '-').length,
+  }
 }

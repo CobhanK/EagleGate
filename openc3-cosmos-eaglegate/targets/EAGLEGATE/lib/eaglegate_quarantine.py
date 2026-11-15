@@ -8,15 +8,19 @@ COSMOS's persistent store, so it survives container restarts:
                                                     whole packets, could later be
                                                     released back into COSMOS
   {scope}__EAGLEGATE__QUARANTINE_RAW__{interface}   bytes that were never framed
-                                                    (STRUCTURAL, UNTRUSTED);
+                                                    (STRUCTURAL, UNTRUSTED) and
+                                                    link-layer rejections (LINK,
+                                                    e.g. a whole transfer frame);
                                                     forensics only, never releasable
+  {scope}__EAGLEGATE__QUARANTINE_AUDIT__{interface} admin actions (restore trust,
+                                                    extension resets): who asked,
+                                                    why, and what happened
 
 The raw stream is separate so a flood of garbage cannot push real rule
 denials out of the capped quarantine stream.
 
-Planned for the review tool (not written yet; names reserved here):
+Planned for the review tool (not written yet; name reserved here):
   {scope}__EAGLEGATE__QUARANTINE_REVIEW__{interface}  hash: entry id -> review state
-  {scope}__EAGLEGATE__QUARANTINE_AUDIT__{interface}   stream: who changed what, when
 
 Stream contents are for admins only. The summary packet below (counts and the
 last reason, no packet bytes) is ordinary telemetry for operator screens.
@@ -31,11 +35,12 @@ import time
 from datetime import datetime, timezone
 
 from eaglegate_ccsds_header import CCSDS_HEADER_BYTES, CcsdsHeader
-from eaglegate_verdict import UNTRUSTED
+from eaglegate_verdict import LINK, UNTRUSTED
 
 QUARANTINE_MAXLEN = 10000    # framed entries kept; ~10 MB at the default 1024-byte max packet
 RAW_MAXLEN = 1000            # raw entries kept
 RAW_CAPTURE_BYTES = 4096     # bytes kept per raw entry, and per untrusted connection
+AUDIT_MAXLEN = 10000         # admin actions kept
 PAUSE_AFTER_ERROR = 30.0     # seconds to stop trying after a failed write
 
 STATUS_PACKET = "FIREWALL_STATUS"
@@ -62,16 +67,18 @@ def utc_now():
 def header_of(verdict, data):
     """The CCSDS header the bytes start with, or None when they have none.
     Discarded bytes of an untrusted connection are not aligned to packets, so
-    a "header" decoded from them would show an APID that was never sent."""
-    if verdict.stage == UNTRUSTED or len(data) < CCSDS_HEADER_BYTES:
+    a "header" decoded from them would show an APID that was never sent, and
+    LINK rejections hold link-layer bytes (a frame), not a packet."""
+    if verdict.stage in (UNTRUSTED, LINK) or len(data) < CCSDS_HEADER_BYTES:
         return None
     return CcsdsHeader.from_bytes(data)
 
 
-def entry_fields(verdict, data, interface_name, connection_id, time_text):
+def entry_fields(verdict, data, interface_name, connection_id, time_text, link=None):
     """The stream entry for one rejected packet. Self-contained: the rule's
     description and version are copied in, because the rules file can change
-    after the packet was quarantined. Raw bytes are cut to RAW_CAPTURE_BYTES."""
+    after the packet was quarantined. Raw bytes are cut to RAW_CAPTURE_BYTES.
+    `link`: what an extension knew about the link (e.g. the virtual channel)."""
     kept = data if verdict.framed else data[:RAW_CAPTURE_BYTES]
     fields = {
         "time": time_text,
@@ -94,6 +101,8 @@ def entry_fields(verdict, data, interface_name, connection_id, time_text):
         "apid": "",
         "seq_count": "",
         "packet_type": "",
+        "layer": verdict.layer,
+        "link": json.dumps(link, sort_keys=True) if link else "",
     }
     header = header_of(verdict, data)
     if header:
@@ -101,6 +110,17 @@ def entry_fields(verdict, data, interface_name, connection_id, time_text):
         fields["seq_count"] = header.seq_count
         fields["packet_type"] = "CMD" if header.packet_type else "TLM"
     return fields
+
+
+def _stream_value(value):
+    """Valkey stream fields hold strings, bytes and numbers only."""
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, (dict, list, tuple)):
+        return json.dumps(value, sort_keys=True)
+    return value
 
 
 class _Guarded:
@@ -127,8 +147,9 @@ class QuarantineWriter(_Guarded):
         self.streams = stream_names(scope, interface_name)
         self.written = 0
         self.skipped = 0  # not attempted because writes were paused
+        self.audited = 0
 
-    def record(self, verdict, data, connection_id, time_text):
+    def record(self, verdict, data, connection_id, time_text, link=None):
         """Store one rejected packet. Returns the stream entry id, or None."""
         if self._paused():
             self.skipped += 1
@@ -138,12 +159,25 @@ class QuarantineWriter(_Guarded):
         else:
             stream, maxlen = self.streams["raw"], RAW_MAXLEN
         try:
-            fields = entry_fields(verdict, data, self.interface_name, connection_id, time_text)
+            fields = entry_fields(verdict, data, self.interface_name, connection_id, time_text, link)
             entry_id = self._write(stream, fields, maxlen)
         except Exception as error:
             self._failed(error)
             return None
         self.written += 1
+        return entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
+
+    def audit(self, fields):
+        """Store one admin action in the audit stream. Unlike rejections, this is
+        tried even while writes are paused: an admin action is rare and its record
+        matters more. Returns the entry id, or None."""
+        try:
+            entry = {"interface": self.interface_name, **{k: _stream_value(v) for k, v in fields.items()}}
+            entry_id = self._write(self.streams["audit"], entry, AUDIT_MAXLEN)
+        except Exception as error:
+            self._failed(error)
+            return None
+        self.audited += 1
         return entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
 
     def _write(self, stream, fields, maxlen):
@@ -154,7 +188,9 @@ class QuarantineWriter(_Guarded):
 
     def summary(self):
         return {
-            "streams": {"quarantine": self.streams["quarantine"], "raw": self.streams["raw"]},
+            "streams": {"quarantine": self.streams["quarantine"], "raw": self.streams["raw"],
+                        "audit": self.streams["audit"]},
+            "audited": self.audited,
             "written": self.written,
             "errors": self.errors,
             "skipped": self.skipped,

@@ -41,6 +41,10 @@
         "help": "(packet[offset] & mask) == value, for every entry",
         "type": "byte_checks"
       },
+      "link": {
+        "help": "what the extension in front of the firewall knows about the link the packet arrived on, e.g. its virtual channel; every key must hold. Packets without link information never match",
+        "type": "link_match"
+      },
       "max_length": {
         "help": "total packet bytes, inclusive",
         "max": 65542,
@@ -68,7 +72,8 @@
     "rules": [
       "apid_range low <= high",
       "min_length <= max_length",
-      "bytes: value has no bits outside mask"
+      "bytes: value has no bits outside mask",
+      "link: only keys an extension on this interface provides"
     ]
   },
   "max_rules": 500,
@@ -498,6 +503,14 @@
       ]
     }
   },
+  "settings": {
+    "untrust_on_first_packet_reject": {
+      "default": true,
+      "help": "on: if the first packet of a connection is rejected, every later byte is discarded until the interface reconnects or an admin restores trust (a sender that starts wrong is probably not the spacecraft). off: each packet is judged on its own. Turn it off behind an extension that already checks the sender, such as the SDLS frame layer",
+      "title": "Distrust the connection if its first packet is rejected",
+      "type": "bool"
+    }
+  },
   "text": {
     "encodings": [
       "ascii",
@@ -563,6 +576,7 @@
     "default_action",
     "description",
     "rules",
+    "settings",
     "version"
   ]
 }

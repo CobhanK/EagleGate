@@ -9,6 +9,15 @@
 
   The COSMOS server decides who may apply: the admin role in Enterprise, any
   logged in user in Core. The read-only mode here only mirrors that.
+
+  The Link status tab (LinkStatus.vue) shows what the firewall is seeing: every
+  packet counted per APID, plus panels and admin actions that extensions
+  describe (e.g. the SDLS plugin's frame counts and Reset anti-replay counter).
+
+  Every interface running the firewall protocol can be edited (the selector at
+  the top); each has its own rules. Interfaces with an extension in front of
+  the firewall (e.g. the eaglegate-sdls plugin) also show the extension's rules
+  section and link conditions, built from what that interface reports.
 -->
 <template>
   <div>
@@ -17,6 +26,17 @@
     <v-alert v-if="loadError" type="error" variant="tonal" class="ma-2">
       {{ loadError }}
     </v-alert>
+    <div v-if="interfaces.length > 1" class="ma-2" style="max-width: 520px">
+      <v-select
+        :model-value="interfaceName"
+        :items="interfaceItems"
+        label="Interface"
+        hint="Each interface running the firewall has its own rules"
+        persistent-hint
+        density="compact"
+        @update:model-value="selectInterface"
+      />
+    </div>
     <v-alert
       v-if="!isEnterprise && loaded"
       type="info"
@@ -37,329 +57,423 @@
       Read only: changing the firewall rules needs the COSMOS admin role.
     </v-alert>
 
-    <!-- What the firewall is running -->
-    <v-card v-if="state" class="ma-2">
-      <v-card-title class="d-flex align-center">
-        Running rules
-        <v-spacer />
-        <v-btn
-          variant="text"
-          prepend-icon="mdi-refresh"
-          :loading="loading"
-          @click="load"
-        >
-          Refresh
-        </v-btn>
-      </v-card-title>
-      <v-card-text>
-        <v-row dense>
-          <v-col cols="6" md="2"
-            ><div class="text-caption">Version</div>
-            {{ versionText }}</v-col
-          >
-          <v-col cols="6" md="3">
-            <div class="text-caption">sha256</div>
-            <code>{{ (state.rules.sha256 || '-').slice(0, 12) }}</code>
-            <v-chip
-              v-if="signing.enabled"
-              size="x-small"
-              class="ml-2"
-              :color="state.rules_signing?.running_signed ? 'success' : 'error'"
-            >
-              {{
-                state.rules_signing?.running_signed ? 'signed' : 'not signed'
-              }}
-            </v-chip>
-          </v-col>
-          <v-col cols="6" md="2"
-            ><div class="text-caption">Loaded from</div>
-            {{ sourceText }}</v-col
-          >
-          <v-col cols="6" md="3"
-            ><div class="text-caption">Loaded at</div>
-            {{ state.rules_loaded_at || '-' }}</v-col
-          >
-          <v-col cols="6" md="2"
-            ><div class="text-caption">Rejected</div>
-            {{ state.rejected }}</v-col
-          >
-        </v-row>
-        <v-alert
-          v-if="state.rules_error"
-          type="error"
-          variant="tonal"
-          density="compact"
-          class="mt-2"
-        >
-          Last load refused ({{ state.rules_error_at }}):
-          {{ state.rules_error }}
-        </v-alert>
-        <v-alert
-          v-if="state.persist_error"
-          type="warning"
-          variant="tonal"
-          density="compact"
-          class="mt-2"
-        >
-          The rules are running but were not saved, so a restart would bring
-          back the previous set:
-          {{ state.persist_error }}
-        </v-alert>
-        <v-alert
-          v-if="signing.error"
-          type="error"
-          variant="tonal"
-          density="compact"
-          class="mt-2"
-        >
-          Rules signing is misconfigured, so the firewall loads and applies no
-          rules: {{ signing.error }}
-        </v-alert>
-        <v-alert
-          v-else-if="!signing.enabled && !readonly"
-          type="info"
-          variant="tonal"
-          density="compact"
-          class="mt-2"
-        >
-          Rules signing is off: anyone with direct access to the COSMOS bucket
-          (its credentials, or root on the host) could change the active rules
-          without EagleGate noticing. Set up {{ signing.key_env }} as described
-          in plugin.txt to turn it on.
-        </v-alert>
-        <v-alert
-          v-if="state.rules.version < 0 && !readonly"
-          type="error"
-          variant="tonal"
-          density="compact"
-          class="mt-2"
-        >
-          The firewall is denying all telemetry because it has no rules it can
-          trust. Review the rules below and apply them to restore filtering.
-        </v-alert>
-        <v-alert
-          v-if="state.connection_untrusted"
-          type="warning"
-          variant="tonal"
-          density="compact"
-          class="mt-2"
-        >
-          The first packet of this connection was rejected, so all telemetry is
-          being discarded. New rules do not change that; reconnect
-          {{ interfaceName }} to resume.
-        </v-alert>
-        <v-alert
-          v-if="readMismatch"
-          type="warning"
-          variant="tonal"
-          density="compact"
-          class="mt-2"
-        >
-          The stored rules differ from what the firewall is running (it may have
-          refused a newer file). The editor shows the stored file, which may
-          have been changed outside EagleGate: check the diff before applying,
-          or load a known good version from History.
-        </v-alert>
-      </v-card-text>
-    </v-card>
-
-    <v-alert v-if="draftOffer" type="info" variant="tonal" class="ma-2">
-      There is an edited rules file in {{ draftOffer.key }} (the procedure's
-      draft) that differs from the running rules.
-      <template #append>
-        <v-btn variant="text" @click="importDraft">Load into editor</v-btn>
-        <v-btn variant="text" @click="draftOffer = null">Ignore</v-btn>
+    <v-alert
+      v-if="state?.connection_untrusted"
+      type="warning"
+      variant="tonal"
+      density="compact"
+      class="ma-2"
+    >
+      <div>
+        This connection is untrusted, so all telemetry on
+        {{ interfaceName }} is being discarded
+        <span v-if="state.untrusted_since"
+          >(since {{ state.untrusted_since }})</span
+        >. New rules do not change that.
+      </div>
+      <div v-if="state.untrusted_cause" class="text-caption">
+        Why: {{ state.untrusted_cause }}
+      </div>
+      <div class="text-caption">
+        Reconnecting the interface also clears it, but some senders (such as the
+        NOS3 radio simulator) never reconnect on their own.
+      </div>
+      <template v-if="!readonly" #append>
+        <v-btn variant="text" @click="openTrustDialog">Restore trust…</v-btn>
       </template>
     </v-alert>
+    <v-tabs v-model="tab" class="mx-2" color="primary">
+      <v-tab value="rules">Rules</v-tab>
+      <v-tab value="link">Link status</v-tab>
+    </v-tabs>
 
-    <!-- The editor -->
-    <v-card v-if="doc" class="ma-2">
-      <v-card-title class="d-flex align-center">
-        Rules
-        <v-chip v-if="dirty" size="small" color="warning" class="ml-2"
-          >unsaved changes</v-chip
-        >
-        <v-spacer />
-        <v-menu v-if="!readonly">
-          <template #activator="{ props }">
-            <v-btn v-bind="props" variant="text" prepend-icon="mdi-plus"
-              >Add rule</v-btn
+    <!-- Live counts, extension panels and admin actions; polls only while shown -->
+    <link-status
+      v-if="tab === 'link'"
+      :interface-name="interfaceName"
+      :readonly="readonly"
+      @state="onLinkState"
+    />
+
+    <div v-show="tab === 'rules'">
+      <!-- What the firewall is running -->
+      <v-card v-if="state" class="ma-2">
+        <v-card-title class="d-flex align-center">
+          Running rules
+          <v-spacer />
+          <v-btn
+            variant="text"
+            prepend-icon="mdi-refresh"
+            :loading="loading"
+            @click="load"
+          >
+            Refresh
+          </v-btn>
+        </v-card-title>
+        <v-card-text>
+          <v-row dense>
+            <v-col cols="6" md="2"
+              ><div class="text-caption">Version</div>
+              {{ versionText }}</v-col
             >
-          </template>
-          <v-list>
-            <v-list-item
-              v-for="item in addMenu"
-              :key="item.key"
-              :title="item.title"
-              :subtitle="item.subtitle"
-              :class="{ 'ml-4': item.preset }"
-              @click="addRule(item.type, item.preset)"
-            />
-          </v-list>
-        </v-menu>
-      </v-card-title>
-      <v-card-text>
-        <div class="text-caption mb-2">
-          Checked top to bottom; the first rule that fires decides. Check rules
-          (range, sequence, rate, authenticity, text) go above the ALLOW rules
-          they protect.
-        </div>
-        <v-row dense>
-          <v-col cols="12" md="3">
-            <v-select
-              v-model="doc.default_action"
-              :items="schema.actions"
-              label="When no rule fires"
-              :readonly="readonly"
-            />
-          </v-col>
-          <v-col cols="12" md="9">
-            <v-text-field
-              v-model="doc.description"
-              label="Description"
-              :readonly="readonly"
-            />
-          </v-col>
-        </v-row>
-
-        <v-table density="compact">
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>On</th>
-              <th>ID</th>
-              <th>Type</th>
-              <th>Action</th>
-              <th>Applies to</th>
-              <th class="text-right">Hits</th>
-              <th></th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr
-              v-for="(rule, index) in doc.rules"
-              :key="rule.id + index"
-              :class="{ 'text-disabled': rule.enabled === false }"
+            <v-col cols="6" md="3">
+              <div class="text-caption">sha256</div>
+              <code>{{ (state.rules.sha256 || '-').slice(0, 12) }}</code>
+              <v-chip
+                v-if="signing.enabled"
+                size="x-small"
+                class="ml-2"
+                :color="
+                  state.rules_signing?.running_signed ? 'success' : 'error'
+                "
+              >
+                {{
+                  state.rules_signing?.running_signed ? 'signed' : 'not signed'
+                }}
+              </v-chip>
+            </v-col>
+            <v-col cols="6" md="2"
+              ><div class="text-caption">Loaded from</div>
+              {{ sourceText }}</v-col
             >
-              <td>{{ index + 1 }}</td>
-              <td>
-                <v-switch
-                  :model-value="rule.enabled !== false"
-                  density="compact"
-                  hide-details
-                  color="primary"
-                  :readonly="readonly"
-                  :aria-label="`Enable ${rule.id}`"
-                  @update:model-value="setEnabled(rule, $event)"
-                />
-              </td>
-              <td>
-                <div>{{ rule.id }}</div>
-                <div class="text-caption">{{ rule.description }}</div>
-              </td>
-              <td>
-                <v-chip size="small">{{ rule.type || 'match' }}</v-chip>
-              </td>
-              <td>
-                <v-chip
-                  size="small"
-                  :color="rule.action === 'ALLOW' ? 'success' : 'error'"
-                >
-                  {{ rule.action }}
-                </v-chip>
-              </td>
-              <td class="text-caption">{{ matchSummary(rule.match) }}</td>
-              <td class="text-right">{{ hits(rule.id) }}</td>
-              <td class="text-no-wrap">
-                <template v-if="!readonly">
-                  <v-btn
-                    icon="mdi-arrow-up"
-                    size="small"
-                    variant="text"
-                    :disabled="index === 0"
-                    aria-label="Move up"
-                    @click="move(index, -1)"
-                  />
-                  <v-btn
-                    icon="mdi-arrow-down"
-                    size="small"
-                    variant="text"
-                    :disabled="index === doc.rules.length - 1"
-                    aria-label="Move down"
-                    @click="move(index, 1)"
-                  />
-                </template>
-                <v-btn
-                  :icon="readonly ? 'mdi-eye' : 'mdi-pencil'"
-                  size="small"
-                  variant="text"
-                  aria-label="Edit"
-                  @click="editRule(index)"
-                />
-                <template v-if="!readonly">
-                  <v-btn
-                    icon="mdi-content-copy"
-                    size="small"
-                    variant="text"
-                    aria-label="Duplicate"
-                    @click="duplicate(index)"
-                  />
-                  <v-btn
-                    icon="mdi-delete"
-                    size="small"
-                    variant="text"
-                    aria-label="Delete"
-                    @click="remove(index)"
-                  />
-                </template>
-              </td>
-            </tr>
-            <tr>
-              <td></td>
-              <td colspan="5" class="text-caption">
-                No rule fired: {{ doc.default_action }}
-              </td>
-              <td class="text-right">
-                {{ state ? state.rules.default_hits : '' }}
-              </td>
-              <td></td>
-            </tr>
-          </tbody>
-        </v-table>
+            <v-col cols="6" md="3"
+              ><div class="text-caption">Loaded at</div>
+              {{ state.rules_loaded_at || '-' }}</v-col
+            >
+            <v-col cols="6" md="2"
+              ><div class="text-caption">Rejected</div>
+              {{ state.rejected }}</v-col
+            >
+          </v-row>
+          <v-alert
+            v-if="state.rules_error"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mt-2"
+          >
+            Last load refused ({{ state.rules_error_at }}):
+            {{ state.rules_error }}
+          </v-alert>
+          <v-alert
+            v-if="state.interface_warning"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mt-2"
+          >
+            {{ interfaceName }} {{ state.interface_warning }}.
+          </v-alert>
+          <v-alert
+            v-if="state.persist_error"
+            type="warning"
+            variant="tonal"
+            density="compact"
+            class="mt-2"
+          >
+            The rules are running but were not saved, so a restart would bring
+            back the previous set:
+            {{ state.persist_error }}
+          </v-alert>
+          <v-alert
+            v-if="signing.error"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mt-2"
+          >
+            Rules signing is misconfigured, so the firewall loads and applies no
+            rules: {{ signing.error }}
+          </v-alert>
+          <v-alert
+            v-else-if="!signing.enabled && !readonly"
+            type="info"
+            variant="tonal"
+            density="compact"
+            class="mt-2"
+          >
+            Rules signing is off: anyone with direct access to the COSMOS bucket
+            (its credentials, or root on the host) could change the active rules
+            without EagleGate noticing. Set up {{ signing.key_env }} as
+            described in plugin.txt to turn it on.
+          </v-alert>
+          <v-alert
+            v-if="state.rules.version < 0 && !readonly"
+            type="error"
+            variant="tonal"
+            density="compact"
+            class="mt-2"
+          >
+            The firewall is denying all telemetry because it has no rules it can
+            trust. Review the rules below and apply them to restore filtering.
+          </v-alert>
+          <v-alert
+            v-if="readMismatch"
+            type="warning"
+            variant="tonal"
+            density="compact"
+            class="mt-2"
+          >
+            The stored rules differ from what the firewall is running (it may
+            have refused a newer file). The editor shows the stored file, which
+            may have been changed outside EagleGate: check the diff before
+            applying, or load a known good version from History.
+          </v-alert>
+        </v-card-text>
+      </v-card>
 
-        <v-alert v-if="errors.length" type="error" variant="tonal" class="mt-4">
-          <div class="font-weight-bold">
-            The firewall would refuse this file:
+      <v-alert v-if="draftOffer" type="info" variant="tonal" class="ma-2">
+        There is an edited rules file in {{ draftOffer.key }} (the procedure's
+        draft) that differs from the running rules.
+        <template #append>
+          <v-btn variant="text" @click="importDraft">Load into editor</v-btn>
+          <v-btn variant="text" @click="draftOffer = null">Ignore</v-btn>
+        </template>
+      </v-alert>
+
+      <!-- The editor -->
+      <v-card v-if="doc" class="ma-2">
+        <v-card-title class="d-flex align-center">
+          Rules
+          <v-chip v-if="dirty" size="small" color="warning" class="ml-2"
+            >unsaved changes</v-chip
+          >
+          <v-spacer />
+          <v-menu v-if="!readonly">
+            <template #activator="{ props }">
+              <v-btn v-bind="props" variant="text" prepend-icon="mdi-plus"
+                >Add rule</v-btn
+              >
+            </template>
+            <v-list>
+              <v-list-item
+                v-for="item in addMenu"
+                :key="item.key"
+                :title="item.title"
+                :subtitle="item.subtitle"
+                :class="{ 'ml-4': item.preset }"
+                @click="addRule(item.type, item.preset)"
+              />
+            </v-list>
+          </v-menu>
+        </v-card-title>
+        <v-card-text>
+          <div class="text-caption mb-2">
+            Checked top to bottom; the first rule that fires decides. Check
+            rules (range, sequence, rate, authenticity, text) go above the ALLOW
+            rules they protect.
           </div>
-          <div v-for="error in errors" :key="error">{{ error }}</div>
-        </v-alert>
-        <v-alert
-          v-if="warningList.length"
-          type="warning"
-          variant="tonal"
-          class="mt-4"
-        >
-          <div v-for="warning in warningList" :key="warning">{{ warning }}</div>
-        </v-alert>
-      </v-card-text>
-      <v-card-actions v-if="!readonly">
-        <v-btn variant="text" prepend-icon="mdi-history" @click="openHistory"
-          >History</v-btn
-        >
-        <v-spacer />
-        <v-btn variant="text" :disabled="!dirty" @click="discard"
-          >Discard changes</v-btn
-        >
-        <v-btn
-          color="primary"
-          variant="flat"
-          :disabled="!canApply || errors.length > 0"
-          @click="review"
-        >
-          Review and apply
-        </v-btn>
-      </v-card-actions>
-    </v-card>
+          <v-row dense>
+            <v-col cols="12" md="3">
+              <v-select
+                v-model="doc.default_action"
+                :items="schema.actions"
+                label="When no rule fires"
+                :readonly="readonly"
+              />
+            </v-col>
+            <v-col cols="12" md="9">
+              <v-text-field
+                v-model="doc.description"
+                label="Description"
+                :readonly="readonly"
+              />
+            </v-col>
+          </v-row>
+
+          <div class="text-subtitle-2">Settings</div>
+          <v-row dense>
+            <v-col
+              v-for="(spec, key) in schema.settings"
+              :key="key"
+              cols="12"
+              md="6"
+            >
+              <v-switch
+                :model-value="settingValue(doc, schema, key)"
+                :label="spec.title || key"
+                :hint="spec.help"
+                persistent-hint
+                color="primary"
+                :readonly="readonly"
+                @update:model-value="setSetting(doc, schema, key, $event)"
+              />
+            </v-col>
+          </v-row>
+
+          <v-expansion-panels
+            v-if="Object.keys(schema.extensions || {}).length"
+            multiple
+            class="my-4"
+          >
+            <v-expansion-panel
+              v-for="(extension, section) in schema.extensions"
+              :key="section"
+            >
+              <v-expansion-panel-title>
+                {{ extension.name }} {{ extension.version }}: "{{ section }}"
+                section
+                <span class="text-caption ml-2"
+                  >(applied, versioned and signed with these rules)</span
+                >
+              </v-expansion-panel-title>
+              <v-expansion-panel-text>
+                <schema-field
+                  :spec="extension.schema"
+                  :model-value="doc[section]"
+                  :readonly="readonly"
+                  @update:model-value="setSection(section, $event)"
+                />
+              </v-expansion-panel-text>
+            </v-expansion-panel>
+          </v-expansion-panels>
+
+          <v-table density="compact">
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>On</th>
+                <th>ID</th>
+                <th>Type</th>
+                <th>Action</th>
+                <th>Applies to</th>
+                <th class="text-right">Hits</th>
+                <th></th>
+              </tr>
+            </thead>
+            <tbody>
+              <tr
+                v-for="(rule, index) in doc.rules"
+                :key="rule.id + index"
+                :class="{ 'text-disabled': rule.enabled === false }"
+              >
+                <td>{{ index + 1 }}</td>
+                <td>
+                  <v-switch
+                    :model-value="rule.enabled !== false"
+                    density="compact"
+                    hide-details
+                    color="primary"
+                    :readonly="readonly"
+                    :aria-label="`Enable ${rule.id}`"
+                    @update:model-value="setEnabled(rule, $event)"
+                  />
+                </td>
+                <td>
+                  <div>{{ rule.id }}</div>
+                  <div class="text-caption">{{ rule.description }}</div>
+                </td>
+                <td>
+                  <v-chip size="small">{{ rule.type || 'match' }}</v-chip>
+                </td>
+                <td>
+                  <v-chip
+                    size="small"
+                    :color="rule.action === 'ALLOW' ? 'success' : 'error'"
+                  >
+                    {{ rule.action }}
+                  </v-chip>
+                </td>
+                <td class="text-caption">{{ matchSummary(rule.match) }}</td>
+                <td class="text-right">{{ hits(rule.id) }}</td>
+                <td class="text-no-wrap">
+                  <template v-if="!readonly">
+                    <v-btn
+                      icon="mdi-arrow-up"
+                      size="small"
+                      variant="text"
+                      :disabled="index === 0"
+                      aria-label="Move up"
+                      @click="move(index, -1)"
+                    />
+                    <v-btn
+                      icon="mdi-arrow-down"
+                      size="small"
+                      variant="text"
+                      :disabled="index === doc.rules.length - 1"
+                      aria-label="Move down"
+                      @click="move(index, 1)"
+                    />
+                  </template>
+                  <v-btn
+                    :icon="readonly ? 'mdi-eye' : 'mdi-pencil'"
+                    size="small"
+                    variant="text"
+                    aria-label="Edit"
+                    @click="editRule(index)"
+                  />
+                  <template v-if="!readonly">
+                    <v-btn
+                      icon="mdi-content-copy"
+                      size="small"
+                      variant="text"
+                      aria-label="Duplicate"
+                      @click="duplicate(index)"
+                    />
+                    <v-btn
+                      icon="mdi-delete"
+                      size="small"
+                      variant="text"
+                      aria-label="Delete"
+                      @click="remove(index)"
+                    />
+                  </template>
+                </td>
+              </tr>
+              <tr>
+                <td></td>
+                <td colspan="5" class="text-caption">
+                  No rule fired: {{ doc.default_action }}
+                </td>
+                <td class="text-right">
+                  {{ state ? state.rules.default_hits : '' }}
+                </td>
+                <td></td>
+              </tr>
+            </tbody>
+          </v-table>
+
+          <v-alert
+            v-if="errors.length"
+            type="error"
+            variant="tonal"
+            class="mt-4"
+          >
+            <div class="font-weight-bold">
+              The firewall would refuse this file:
+            </div>
+            <div v-for="error in errors" :key="error">{{ error }}</div>
+          </v-alert>
+          <v-alert
+            v-if="warningList.length"
+            type="warning"
+            variant="tonal"
+            class="mt-4"
+          >
+            <div v-for="warning in warningList" :key="warning">
+              {{ warning }}
+            </div>
+          </v-alert>
+        </v-card-text>
+        <v-card-actions v-if="!readonly">
+          <v-btn variant="text" prepend-icon="mdi-history" @click="openHistory"
+            >History</v-btn
+          >
+          <v-spacer />
+          <v-btn variant="text" :disabled="!dirty" @click="discard"
+            >Discard changes</v-btn
+          >
+          <v-btn
+            color="primary"
+            variant="flat"
+            :disabled="!canApply || errors.length > 0"
+            @click="review"
+          >
+            Review and apply
+          </v-btn>
+        </v-card-actions>
+      </v-card>
+    </div>
 
     <rule-editor
       v-if="schema"
@@ -373,12 +487,29 @@
     />
 
     <!-- Review: what changes, then apply -->
+    <!-- The card is capped at the window height and only the diff scrolls, so
+         the Apply button is always on screen however long the rules are -->
     <v-dialog v-model="reviewing" max-width="1000" scrollable>
-      <v-card>
-        <v-card-title
-          >Apply version {{ toApply && toApply.doc.version }}?</v-card-title
-        >
-        <v-card-text>
+      <v-card class="review-card">
+        <v-card-title class="d-flex align-center flex-wrap">
+          Apply version {{ toApply && toApply.doc.version }}?
+          <v-spacer />
+          <span class="text-body-2">
+            <span class="text-success">+{{ diffCounts.added }}</span>
+            <span class="text-error ml-2">−{{ diffCounts.removed }}</span>
+            lines
+          </span>
+          <v-switch
+            v-model="fullDiff"
+            label="Whole file"
+            density="compact"
+            hide-details
+            color="primary"
+            class="ml-4 flex-grow-0"
+          />
+        </v-card-title>
+        <v-divider />
+        <v-card-text class="review-body">
           <v-alert
             v-if="warningList.length"
             type="warning"
@@ -391,12 +522,13 @@
             </div>
           </v-alert>
           <pre class="diff"><span
-            v-for="(row, i) in diffRows"
+            v-for="(row, i) in shownDiffRows"
             :key="i"
-            :class="{ added: row.op === '+', removed: row.op === '-' }"
+            :class="{ added: row.op === '+', removed: row.op === '-', folded: row.op === '…' }"
           >{{ row.op }} {{ row.line }}
 </span></pre>
         </v-card-text>
+        <v-divider />
         <v-card-actions>
           <v-spacer />
           <v-btn variant="text" :disabled="applying" @click="reviewing = false"
@@ -408,6 +540,48 @@
             :loading="applying"
             @click="apply"
             >Apply</v-btn
+          >
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
+    <!-- Restore trust: an admin request, then RESTORE_TRUST -->
+    <v-dialog v-model="trust.open" max-width="640">
+      <v-card>
+        <v-card-title>Restore trust in {{ interfaceName }}?</v-card-title>
+        <v-card-text>
+          <p class="mb-2">
+            The firewall stops discarding this connection's telemetry and judges
+            each packet again. Do this only once you know why the connection
+            became untrusted:
+          </p>
+          <p class="text-caption mb-4">{{ state?.untrusted_cause }}</p>
+          <v-textarea
+            v-model="trust.reason"
+            label="Reason (kept in the audit log)"
+            :error-messages="
+              trust.reason ? reasonProblem(trust.reason) || [] : []
+            "
+            counter="256"
+            rows="2"
+            auto-grow
+          />
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn
+            variant="text"
+            :disabled="trust.busy"
+            @click="trust.open = false"
+            >Cancel</v-btn
+          >
+          <v-btn
+            color="primary"
+            variant="flat"
+            :loading="trust.busy"
+            :disabled="!!reasonProblem(trust.reason)"
+            @click="restoreTrust"
+            >Restore trust</v-btn
           >
         </v-card-actions>
       </v-card>
@@ -448,23 +622,34 @@
 
 <script>
 import { TopBar } from '@openc3/vue-common/components'
+import LinkStatus from './LinkStatus.vue'
 import RuleEditor from './RuleEditor.vue'
+import SchemaField from './SchemaField.vue'
+import { reasonProblem } from './adminRequest.js'
 import {
   clone,
+  compactDiff,
+  diffStats,
   lineDiff,
+  linkSummary,
   newRule,
+  setSetting,
+  settingValue,
   toFileText,
   toInt,
   validate,
   warnings,
   withBumpedVersion,
+  withExtensions,
 } from './rulesModel.js'
 import {
-  INTERFACE,
+  DEFAULT_INTERFACE,
+  adminAction,
   applyRules,
   cosmosInfo,
   downloadKey,
   draftKey,
+  firewallInterfaces,
   firewallState,
   listHistory,
   runningKey,
@@ -474,14 +659,16 @@ import {
 
 const SCHEMA_URL = '/tools/eaglegate/eaglegate_rules_schema.json'
 const EMPTY_RULES = { version: 0, default_action: 'DENY', rules: [] }
+const INTERFACE_KEY = 'eaglegate.interface' // remembers the last interface edited
 
 export default {
-  components: { RuleEditor, TopBar },
+  components: { LinkStatus, RuleEditor, SchemaField, TopBar },
   data() {
     return {
       title: 'EagleGate Firewall Rules',
-      interfaceName: INTERFACE,
-      schema: null,
+      interfaceName: DEFAULT_INTERFACE,
+      interfaces: [], // [{ name, target, protocols }] running the firewall
+      baseSchema: null, // public/eaglegate_rules_schema.json: the core rules format
       isEnterprise: false,
       isAdmin: false,
       loaded: false,
@@ -505,9 +692,24 @@ export default {
       applying: false,
       toApply: null,
       history: { open: false, items: [] },
+      trust: { open: false, reason: '', busy: false },
+      tab: 'rules',
+      fullDiff: false, // review dialog: whole file instead of only the changes
     }
   },
   computed: {
+    // The core format plus what this interface's extensions add
+    schema() {
+      if (!this.baseSchema) return null
+      return withExtensions(this.baseSchema, this.state?.extensions || {})
+    },
+    interfaceItems() {
+      return this.interfaces.map((i) => ({
+        title: `${i.name} (rules of ${i.target})`,
+        subtitle: i.protocols.join(' → '),
+        value: i.name,
+      }))
+    },
     readonly() {
       return this.isEnterprise && !this.isAdmin
     },
@@ -589,6 +791,13 @@ export default {
     diffRows() {
       return this.toApply ? lineDiff(this.runningNormal, this.toApply.text) : []
     },
+    // Only the changes (with context) unless "Whole file" is on
+    shownDiffRows() {
+      return this.fullDiff ? this.diffRows : compactDiff(this.diffRows)
+    },
+    diffCounts() {
+      return diffStats(this.diffRows)
+    },
   },
   async created() {
     this.isAdmin = userIsAdmin()
@@ -602,14 +811,97 @@ export default {
         }),
       ])
       this.isEnterprise = info.enterprise === true
-      this.schema = schema
+      this.baseSchema = schema
     } catch (error) {
       this.loadError = `Could not start the editor: ${error.message}`
       return
     }
+    await this.findInterfaces()
     await this.load()
   },
   methods: {
+    settingValue,
+    setSetting,
+    reasonProblem,
+    async findInterfaces() {
+      try {
+        this.interfaces = await firewallInterfaces()
+      } catch {
+        this.interfaces = [] // keep the default interface
+      }
+      const names = this.interfaces.map((i) => i.name)
+      let remembered = null
+      try {
+        remembered = localStorage.getItem(INTERFACE_KEY)
+      } catch {
+        // storage blocked: use the default
+      }
+      if (remembered && names.includes(remembered))
+        this.interfaceName = remembered
+      else if (names.length && !names.includes(DEFAULT_INTERFACE))
+        this.interfaceName = names[0]
+    },
+    async selectInterface(name) {
+      if (name === this.interfaceName) return
+      if (this.dirty) {
+        try {
+          await this.$dialog.confirm(
+            `Discard your unsaved changes to ${this.interfaceName}'s rules?`,
+            { okText: 'Discard' },
+          )
+        } catch {
+          return
+        }
+      }
+      this.interfaceName = name
+      try {
+        localStorage.setItem(INTERFACE_KEY, name)
+      } catch {
+        // not remembered; harmless
+      }
+      this.doc = null // so load() does not ask again
+      this.state = null
+      await this.load()
+    },
+    // Keep the banners (untrusted, rules errors) current while the Link status tab polls
+    onLinkState(firewall) {
+      if (this.state) this.state = firewall
+    },
+    setSection(section, value) {
+      if (value === undefined) delete this.doc[section]
+      else this.doc[section] = value
+    },
+    openTrustDialog() {
+      this.trust = { open: true, reason: '', busy: false }
+    },
+    async restoreTrust() {
+      this.trust.busy = true
+      try {
+        const answer = await adminAction(
+          this.interfaceName,
+          'restore_trust',
+          'RESTORE_TRUST',
+          this.trust.reason,
+        )
+        this.state = answer.state
+        if (answer.ok) {
+          this.$notify.normal({ title: 'Trust restored', body: answer.detail })
+          this.trust.open = false
+        } else {
+          this.$notify.serious({
+            title: 'The firewall refused',
+            body: answer.detail,
+          })
+        }
+      } catch (error) {
+        this.$notify.serious({
+          title: 'Trust not restored',
+          body: error.message,
+        })
+      } finally {
+        this.trust.busy = false
+      }
+    },
     async load() {
       if (this.dirty) {
         try {
@@ -626,7 +918,7 @@ export default {
       this.loading = true
       this.loadError = null
       try {
-        const state = await firewallState()
+        const state = await firewallState(this.interfaceName)
         const text = await downloadKey(runningKey(state))
         this.state = state
         this.baseSha256 = state.rules.sha256
@@ -638,7 +930,7 @@ export default {
         await this.checkDraft(state)
         this.loaded = true
       } catch (error) {
-        this.loadError = `Could not read the firewall state from ${INTERFACE}: ${error.message}`
+        this.loadError = `Could not read the firewall state from ${this.interfaceName}: ${error.message}`
       } finally {
         this.loading = false
       }
@@ -698,6 +990,7 @@ export default {
         parts.push(
           `byte[${check.offset}] & ${check.mask ?? '0xFF'} == ${check.value}`,
         )
+      if (match.link) parts.push(linkSummary(match.link))
       return parts.join('; ')
     },
     hits(id) {
@@ -767,12 +1060,17 @@ export default {
     review() {
       const doc = withBumpedVersion(this.doc, this.state.rules.version)
       this.toApply = { doc, text: toFileText(doc) }
+      this.fullDiff = false
       this.reviewing = true
     },
     async apply() {
       this.applying = true
       try {
-        const state = await applyRules(this.toApply.text, this.baseSha256)
+        const state = await applyRules(
+          this.interfaceName,
+          this.toApply.text,
+          this.baseSha256,
+        )
         this.state = state
         this.baseSha256 = state.rules.sha256
         this.runningText = this.toApply.text
@@ -782,7 +1080,7 @@ export default {
         this.reviewing = false
         this.$notify.normal({
           title: `Rules version ${state.rules.version} active`,
-          body: `${INTERFACE} is now filtering with the new rules`,
+          body: `${this.interfaceName} is now filtering with the new rules`,
         })
       } catch (error) {
         this.reviewing = false
@@ -795,7 +1093,7 @@ export default {
         })
         // Show the refusal in the status panel
         try {
-          this.state = await firewallState()
+          this.state = await firewallState(this.interfaceName)
         } catch {
           // keep the previous state
         }
@@ -840,6 +1138,20 @@ export default {
 </script>
 
 <style scoped>
+.review-card {
+  max-height: 90vh;
+  display: flex;
+  flex-direction: column;
+}
+.review-body {
+  flex: 1 1 auto;
+  min-height: 0;
+  overflow-y: auto;
+}
+.diff .folded {
+  opacity: 0.6;
+  font-style: italic;
+}
 .diff {
   font-size: 0.85em;
   white-space: pre-wrap;

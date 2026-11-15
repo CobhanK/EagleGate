@@ -1,0 +1,11 @@
+{
+  "tm": {"tfvn": 0, "scid": 3, "frame_length": 1786, "has_fecf": false, "has_ocf": false},
+  "key_source": "internal",
+  "security_associations": {
+    "5": {"vcid": 1, "service": "clear", "iv_len": 12},
+    "6": {"vcid": 4, "service": "enc", "ecs": "AES256_GCM", "ekid": 9, "akid": 9, "iv_len": 12,
+          "arsn_len": 2, "abm": "zeros"},
+    "7": {"vcid": 5, "service": "auth", "acs": "HMAC_SHA256", "ekid": 130, "akid": 130, "sn_len": 2,
+          "mac_len": 16, "abm": "zeros"}
+  }
+}

@@ -1,0 +1,14 @@
+{
+  "about": "Built by src/tools/eaglegate/adminRequest.js from inputs; checked by eaglegate_admin_requests.py. Both test suites use this file.",
+  "inputs": {
+    "kind": "restore_trust",
+    "reason": "spacecraft rebooted at 14:02",
+    "params": {
+      "spi": 7
+    },
+    "requestedBy": "alice",
+    "now": "2026-11-09T18:00:00.000Z",
+    "nonce": "0123456789abcdef0123456789abcdef"
+  },
+  "text": "{\n  \"kind\": \"restore_trust\",\n  \"reason\": \"spacecraft rebooted at 14:02\",\n  \"nonce\": \"0123456789abcdef0123456789abcdef\",\n  \"requested_at\": \"2026-11-09T18:00:00.000Z\",\n  \"requested_by\": \"alice\",\n  \"params\": {\n    \"spi\": 7\n  }\n}\n"
+}

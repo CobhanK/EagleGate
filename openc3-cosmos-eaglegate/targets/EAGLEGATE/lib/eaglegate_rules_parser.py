@@ -8,6 +8,9 @@ Rules file format (JSON):
   "version": 3,                       # required int, bump on every change
   "description": "...",               # optional
   "default_action": "DENY",           # required: ALLOW or DENY when no rule fires
+  "settings": {                       # optional; see SETTINGS_SCHEMA for each key and default
+    "untrust_on_first_packet_reject": true
+  },
   "rules": [                          # checked top to bottom, FIRST RULE THAT FIRES WINS
     {
       "id": "allow-housekeeping",     # required, unique
@@ -22,7 +25,8 @@ Rules file format (JSON):
         "sec_hdr": true,                    # secondary header flag
         "min_length": 7,                    # total packet bytes, inclusive
         "max_length": 512,
-        "bytes": [{"offset": 6, "mask": "0x80", "value": "0x80"}]  # (data[offset] & mask) == value
+        "bytes": [{"offset": 6, "mask": "0x80", "value": "0x80"}], # (data[offset] & mask) == value
+        "link": {"vcid": [4, 5]}            # only with an extension, see below
       },
       "params": { ... }               # tunable settings of the rule type, documented
     }                                 # on each class in eaglegate_rule_types.py
@@ -30,29 +34,51 @@ Rules file format (JSON):
 }
 Integers may be JSON numbers or strings like "0x1FF".
 
+Extensions (eaglegate_extensions.py): a protocol placed in front of the firewall
+on the same interface may own one more top-level section (e.g. "link" for the
+eaglegate-sdls plugin) and provide the keys allowed under "match.link". Pass
+them as parse_rules(text, extensions); without them such a file is refused.
+
 Put check rules (range, sequence, rate, authenticity) ABOVE the ALLOW rules
 for the same packets, or the ALLOW decides first and the check never runs.
 """
 import hashlib
 import json
 
+from eaglegate_extensions import link_keys_of, not_loaded_hint
 from eaglegate_match import MATCH_RULES, MATCH_SCHEMA, Match
 from eaglegate_rule import MatchRule
 from eaglegate_rule_types import AuthenticityRule, RangeRule, RateRule, SequenceRule, TextRule
 from eaglegate_text import ENCODINGS, FORMULA_START, SHELL_AND_MARKUP, TEXT_PROFILES
 from eaglegate_rules_error import RulesError
-from eaglegate_ruleset import Ruleset
+from eaglegate_ruleset import DEFAULT_SETTINGS, Ruleset
 from eaglegate_validate import no_unknown_keys, require
 
 RULE_TYPES = {cls.TYPE: cls for cls in (MatchRule, RangeRule, SequenceRule, RateRule, AuthenticityRule, TextRule)}
 ACTIONS = ("ALLOW", "DENY")
-TOP_LEVEL_KEYS = {"version", "description", "default_action", "rules"}
+TOP_LEVEL_KEYS = {"version", "description", "default_action", "settings", "rules"}
 RULE_KEYS = {"id", "type", "action", "enabled", "description", "match", "params"}
 MAX_RULES = 500          # bounds the work done per packet
 
+# The "settings" object: firewall behaviour an admin may change. Defaults in
+# eaglegate_ruleset.DEFAULT_SETTINGS.
+SETTINGS_SCHEMA = {
+    "untrust_on_first_packet_reject": {
+        "type": "bool", "default": DEFAULT_SETTINGS["untrust_on_first_packet_reject"],
+        "title": "Distrust the connection if its first packet is rejected",
+        "help": "on: if the first packet of a connection is rejected, every later byte is discarded "
+                "until the interface reconnects or an admin restores trust (a sender that starts wrong "
+                "is probably not the spacecraft). off: each packet is judged on its own. Turn it off "
+                "behind an extension that already checks the sender, such as the SDLS frame layer",
+    },
+}
 
-def parse_rules(text):
-    """Validate rules text (str or bytes) and return a Ruleset."""
+
+def parse_rules(text, extensions=None):
+    """Validate rules text (str or bytes) and return a Ruleset.
+    extensions: {section: Extension} running on this interface
+    (eaglegate_extensions.collect_extensions); each one parses its own section."""
+    extensions = extensions or {}
     if isinstance(text, bytes):
         text = text.decode("utf-8")
     sha256 = hashlib.sha256(text.encode("utf-8")).hexdigest()
@@ -62,7 +88,9 @@ def parse_rules(text):
         raise RulesError(f"not valid JSON: {error}") from None
 
     require(isinstance(doc, dict), "top level must be a JSON object")
-    no_unknown_keys(doc, TOP_LEVEL_KEYS, "top level")
+    unknown = sorted(set(doc) - TOP_LEVEL_KEYS - set(extensions))
+    require(not unknown, f"top level: unknown key(s) {unknown}; allowed: {sorted(TOP_LEVEL_KEYS | set(extensions))}."
+            + not_loaded_hint(unknown[0] if unknown else "", extensions))
     version = doc.get("version")
     require(isinstance(version, int) and not isinstance(version, bool) and version >= 0,
             "'version' must be a non-negative integer")
@@ -70,20 +98,44 @@ def parse_rules(text):
     raw_rules = doc.get("rules")
     require(isinstance(raw_rules, list), "'rules' must be a list")
     require(len(raw_rules) <= MAX_RULES, f"too many rules ({len(raw_rules)} > {MAX_RULES})")
+    settings = _parse_settings(doc.get("settings", {}))
 
+    # Each extension parses its section even when the file has none (raw None),
+    # so it can apply its own defaults
+    sections = {}
+    for section, extension in sorted(extensions.items()):
+        try:
+            sections[section] = extension.parse(doc.get(section), section)
+        except RulesError:
+            raise
+        except Exception as error:  # a bug in an extension must not look like valid rules
+            raise RulesError(f"extension '{extension.name}' failed to parse '{section}': {error}") from None
+
+    link_keys = link_keys_of(extensions)
     rules = []
     seen_ids = set()
     for index, raw in enumerate(raw_rules):
-        rule_id, rule = _parse_rule(raw, f"rules[{index}]")
+        rule_id, rule = _parse_rule(raw, f"rules[{index}]", link_keys)
         require(rule_id not in seen_ids, f"duplicate rule '{rule_id}'")
         seen_ids.add(rule_id)
         if rule is not None:
             rules.append(rule)
 
-    return Ruleset(version=version, default_action=default_action, rules=rules, sha256=sha256)
+    return Ruleset(version=version, default_action=default_action, rules=rules, sha256=sha256,
+                   settings=settings, extensions=sections)
 
 
-def _parse_rule(raw, where):
+def _parse_settings(raw):
+    require(isinstance(raw, dict), "'settings' must be an object")
+    no_unknown_keys(raw, SETTINGS_SCHEMA, "settings")
+    settings = dict(DEFAULT_SETTINGS)
+    for key, value in raw.items():
+        require(isinstance(value, bool), f"settings.{key} must be true or false")
+        settings[key] = value
+    return settings
+
+
+def _parse_rule(raw, where, link_keys=None):
     """Return (rule_id, Rule) for one entry of the "rules" list; Rule is None if disabled.
     A disabled rule's param VALUES are not checked (so, for example, a disabled
     authenticity rule does not need its key); everything else is."""
@@ -103,7 +155,7 @@ def _parse_rule(raw, where):
     description = raw.get("description", "")
     require(isinstance(description, str), f"{where}.description must be a string")
     require("match" in raw, f"{where} is missing 'match' (use {{}} to match everything)")
-    match = Match.parse(raw["match"], f"{where}.match")
+    match = Match.parse(raw["match"], f"{where}.match", link_keys)
 
     params = raw.get("params", {})
     require(isinstance(params, dict), f"{where}.params must be an object")
@@ -123,9 +175,12 @@ def _action(value, allowed, where):
 def rules_schema():
     """What a valid rules file may contain, as plain data for the rules editor page.
     Built from the same constants parse_rules() checks against; parse_rules()
-    stays the authority (the page only uses this to build forms and warn early)."""
+    stays the authority (the page only uses this to build forms and warn early).
+    Extension sections are not in here: each interface reports its own in
+    interface_details (firewall.extensions), since they depend on its protocols."""
     return {
         "top_level_keys": sorted(TOP_LEVEL_KEYS),
+        "settings": SETTINGS_SCHEMA,
         "rule_keys": sorted(RULE_KEYS),
         "actions": list(ACTIONS),
         "max_rules": MAX_RULES,

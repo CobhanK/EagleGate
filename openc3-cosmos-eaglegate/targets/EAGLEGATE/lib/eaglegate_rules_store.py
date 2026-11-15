@@ -10,6 +10,10 @@ The rules are kept in the COSMOS config bucket OUTSIDE targets_modified:
                                                   (and signed, see eaglegate_rules_signing.py)
   {scope}/eaglegate/{TARGET}/history/...          a copy of every version that
                                                   became active, for rollback
+  {scope}/eaglegate/{TARGET}/requests/{kind}.json admin requests such as
+                                                  restore_trust, consumed (deleted)
+                                                  by the firewall; see
+                                                  eaglegate_admin_requests.py
 
 Why there: the COSMOS storage API lets any user with system_set write
 targets_modified, but every other config bucket path needs the admin role
@@ -32,6 +36,7 @@ def rules_keys(scope, target_name):
         "pending": f"{base}/rules_pending.json",
         "active": f"{base}/rules_active.json",
         "history": f"{base}/history/",
+        "requests": f"{base}/requests/",
     }
 
 
@@ -61,6 +66,19 @@ class RulesStore(_Guarded):
 
     def read_original(self):
         return self._get(f"{self.scope}/targets/{self.original_path}")
+
+    def read_request(self, kind):
+        """Text of requests/{kind}.json, or None."""
+        return self._get(f"{self.keys['requests']}{kind}.json")
+
+    def delete_request(self, kind):
+        """Remove a consumed request. Returns True when deleted."""
+        try:
+            self._delete(f"{self.keys['requests']}{kind}.json")
+        except Exception as error:
+            self._failed(error)
+            return False
+        return True
 
     def save_active(self, text, version, sha256, signature=None):
         """Make text the startup rule set and keep a copy in history.
