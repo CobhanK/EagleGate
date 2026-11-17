@@ -186,7 +186,16 @@ TC and SDLS-EP are Phase 3.
   - It holds the keys and the C code.
   - It is under CryptoLib's NOSA licence.
   - It has its own toolchain and SBOM entries.
-- **Note:** the Dockerfile copies the wire-protocol module from the SDLS plugin, so the two ends share one definition. Moving it inside the plugin folder would also work, because the gem only packages `targets/`, `lib/` and so on. That choice is open to revisit.
+- **Note:** the Dockerfile copies the wire-protocol module from the SDLS plugin, so the two ends share one definition. Moving it inside the plugin folder would also work, because the gem only packages `targets/`, `lib/` and so on. Superseded by D11.
+
+### D11. The sidecar moves into the SDLS plugin folder (2026-11-15; supersedes D10)
+- **Decision:** the sources move to `openc3-cosmos-eaglegate-sdls/sidecar/`, and the Python package is renamed `eaglegate_sidecar` so the path doesn't read `sidecar/sidecar`.
+- **Why:** the project owner wants an understandable layout. Only the SDLS plugin talks to the sidecar, and COSMOS never touches it directly.
+- **What stays the same:**
+  - It is still a separate Docker image, still not part of the gem. The gemspec packages only `targets/` and similar folders, and `eagle.sh` removes `sidecar/` from the plugin's copy in `cosmos/`.
+  - Isolation, licensing and toolchain (D10) are unchanged.
+  - The container and host name are still `eaglegate-sdls-sidecar`.
+- **Build:** the image's build context is the plugin folder. `sidecar/Dockerfile.dockerignore` lets in only what the image needs, and never `secrets/`.
 
 ### Key-management items adopted (2026-11-15)
 

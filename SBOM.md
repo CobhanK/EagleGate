@@ -70,7 +70,7 @@ The lockfile resolves 301 packages in total, including transitive ones. Tests us
 
 The plugin's sidecar client (`eaglegate_sdls_sidecar_backend.py`) and wire protocol use only the standard library (`hmac`, `hashlib`, `secrets`, `socket`).
 
-## eaglegate-sdls-sidecar (CryptoLib container, Phase 2)
+## eaglegate-sdls-sidecar (CryptoLib container, Phase 2; sources in `openc3-cosmos-eaglegate-sdls/sidecar/`)
 
 | Component | Version | License | Why |
 |---|---|---|---|

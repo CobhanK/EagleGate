@@ -11,8 +11,9 @@ DEST="$DEST_PARENT/openc3-cosmos-eaglegate"
 # The SDLS extension plugin (needs the core plugin installed first)
 SDLS_SRC="$SCRIPT_DIR/openc3-cosmos-eaglegate-sdls"
 SDLS_DEST="$DEST_PARENT/openc3-cosmos-eaglegate-sdls"
-# The CryptoLib sidecar (a Docker image next to COSMOS, not a plugin)
-SIDECAR_DIR="$SCRIPT_DIR/eaglegate-sdls-sidecar"
+# The CryptoLib sidecar: a Docker image that runs next to COSMOS (not part of the
+# gem). Its sources live in the SDLS plugin folder, which is its build context.
+SIDECAR_DIR="$SDLS_SRC/sidecar"
 SIDECAR_IMAGE="${SIDECAR_IMAGE:-eaglegate-sdls-sidecar:latest}"
 SIDECAR_NAME="${SIDECAR_NAME:-eaglegate-sdls-sidecar}"
 SIDECAR_NETWORK="${SIDECAR_NETWORK:-cosmos_default}"   # COSMOS's docker network
@@ -65,13 +66,15 @@ build_plugin() {
     # Remove any previous copy so the result is always a fresh copy
     rm -rf "$dest"
     cp -R "$src" "$dest"
+    # The sidecar is not part of the gem; never copy its sources or channel key into cosmos
+    rm -rf "$dest/sidecar"
     echo "Copied $dest into $DEST_PARENT"
     (cd "$dest" && ../openc3.sh cli rake build VERSION="$VERSION")
 }
 
 # The CryptoLib sidecar's Docker image (not a gem: started with run-sidecar)
 build_sidecar() {
-    docker build -f "$SIDECAR_DIR/Dockerfile" --target runtime -t "$SIDECAR_IMAGE" "$SCRIPT_DIR"
+    docker build -f "$SIDECAR_DIR/Dockerfile" --target runtime -t "$SIDECAR_IMAGE" "$SDLS_SRC"
     echo "Built the sidecar image $SIDECAR_IMAGE"
 }
 
@@ -106,7 +109,7 @@ case "$COMMAND" in
         ;;
     test-sidecar)
         # The sidecar's tests against the real CryptoLib (test image only)
-        docker build -f "$SIDECAR_DIR/Dockerfile" --target test -t eaglegate-sdls-sidecar:test "$SCRIPT_DIR"
+        docker build -f "$SIDECAR_DIR/Dockerfile" --target test -t eaglegate-sdls-sidecar:test "$SDLS_SRC"
         docker run --rm eaglegate-sdls-sidecar:test
         ;;
     sidecar-key)

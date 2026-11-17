@@ -5,7 +5,7 @@ import sys
 
 HERE = os.path.dirname(os.path.abspath(__file__))
 ROOT = os.path.dirname(HERE)
-PROTOCOL_DIR = os.path.join(os.path.dirname(ROOT), "openc3-cosmos-eaglegate-sdls", "targets", "EAGLEGATE_SDLS", "lib")
+PROTOCOL_DIR = os.path.join(os.path.dirname(ROOT), "targets", "EAGLEGATE_SDLS", "lib")  # the SDLS plugin
 NOS3_CONFIG = os.path.join(ROOT, "config", "nos3.json")
 if not os.path.exists(NOS3_CONFIG):
     NOS3_CONFIG = "/etc/eaglegate-sidecar/nos3.json"

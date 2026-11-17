@@ -1,5 +1,5 @@
 """SidecarCrypto (eaglegate_sdls_sidecar_backend) against the sidecar's real
-server code (../eaglegate-sdls-sidecar) over real TCP sockets, with a stand-in
+server code (../sidecar) over real TCP sockets, with a stand-in
 for CryptoLib. CryptoLib itself is tested in the sidecar's test image."""
 import hashlib
 import os
@@ -18,8 +18,8 @@ from eaglegate_sdls_sidecar_backend import SidecarCrypto
 from eaglegate_sdls_tm_frame import PrimaryHeader, parse_tm_frame
 from sdls_frames import Layout, build_frame, packet
 
-SIDECAR_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "eaglegate-sdls-sidecar")
-pytestmark = pytest.mark.skipif(not os.path.isdir(SIDECAR_DIR), reason="eaglegate-sdls-sidecar not found")
+SIDECAR_DIR = os.path.join(os.path.dirname(__file__), "..", "sidecar")
+pytestmark = pytest.mark.skipif(not os.path.isdir(SIDECAR_DIR), reason="sidecar folder not found")
 if os.path.isdir(SIDECAR_DIR):
     sys.path.insert(0, SIDECAR_DIR)
 
@@ -62,12 +62,12 @@ class FakeEngine:
 
 
 class Sidecar:
-    """The real sidecar server (sidecar.server) on a free localhost port."""
+    """The real sidecar server (eaglegate_sidecar.server) on a free localhost port."""
 
     def __init__(self, sas=None, keys=None, known=KNOWN_TEST_KEYS):
-        from sidecar import config as cfg
-        from sidecar.server import Sidecar as Logic
-        from sidecar.server import SidecarServer
+        from eaglegate_sidecar import config as cfg
+        from eaglegate_sidecar.server import Sidecar as Logic
+        from eaglegate_sidecar.server import SidecarServer
 
         config = cfg.parse({"tm": {"scid": 3, "frame_length": 1786}, "security_associations": sas or SIDECAR_SAS})
         self.engine = FakeEngine(config)
@@ -234,7 +234,7 @@ def test_reconnects_after_the_sidecar_restarts():
     assert crypto.process(tm(config, 7, 5, sn=1), config.sas[7]).status == VERIFIED
     first.stop()
     assert crypto.process(tm(config, 7, 5, sn=2), config.sas[7]).status == UNAVAILABLE
-    from sidecar.server import SidecarServer
+    from eaglegate_sidecar.server import SidecarServer
 
     second = Sidecar()
     second.stop()

@@ -1,7 +1,7 @@
 """The sidecar's TCP server: answers EagleGate's wire protocol v1
 (eaglegate_sdls_sidecar_protocol.py, copied into the image) with CryptoLib.
 
-  python -m sidecar.server --config /etc/eaglegate-sidecar/sidecar.json [--port 7710]
+  python -m eaglegate_sidecar.server --config /etc/eaglegate-sidecar/sidecar.json [--port 7710]
 
 Environment:
   EAGLEGATE_SIDECAR_KEY_FILE  file holding the channel key as hex (a docker

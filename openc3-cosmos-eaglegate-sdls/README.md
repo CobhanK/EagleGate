@@ -17,7 +17,7 @@ radio / ground station --frames--> [ SDLS frame protocol ]  ---packets + link va
   - It enforces everything about the link that can be checked without keys.
   - It labels frames of authenticated SAs as `auth_unverified`.
   - It can't read encrypted SAs.
-- **`sidecar`** (Phase 2): NASA CryptoLib verifies and decrypts frames in the `eaglegate-sdls-sidecar` container. The keys stay there. See "The CryptoLib sidecar" below, and [../eaglegate-sdls-sidecar/README.md](../eaglegate-sdls-sidecar/README.md).
+- **`sidecar`** (Phase 2): NASA CryptoLib verifies and decrypts frames in the `eaglegate-sdls-sidecar` container. The keys stay there. See "The CryptoLib sidecar" below, and [sidecar/README.md](sidecar/README.md).
 
 Design decisions and findings are in [../DECISIONS.md](../DECISIONS.md).
 
@@ -31,6 +31,7 @@ Design decisions and findings are in [../DECISIONS.md](../DECISIONS.md).
 | `targets/EAGLEGATE_SDLS/cmd_tlm/tlm.txt` | `LINK_STATUS` (this layer) and `FIREWALL_STATUS` (the firewall on this interface; a copy of the core's) |
 | `targets/EAGLEGATE_SDLS/screens/` | `link` (frames) and `firewall` (rejections) |
 | `tests/` | pytest suite. It needs the core plugin as a sibling folder, or `EAGLEGATE_CORE_DIR` |
+| `sidecar/` | The CryptoLib sidecar: a Docker image that runs next to COSMOS. **Not part of the gem**: the gemspec packages only `targets/` and similar folders, and `eagle.sh` leaves it out of the copy in `cosmos/` |
 
 | Module | Job |
 |---|---|
@@ -176,7 +177,7 @@ The request must be recent and is used once. Operators who can send commands but
 
 ## The CryptoLib sidecar
 
-With `"crypto": {"backend": "sidecar"}`, each frame of an authenticating or encrypting SA goes to the `eaglegate-sdls-sidecar` container. Clear SAs are never sent. There, NASA CryptoLib 1.5.1 checks the MAC and/or decrypts the frame. Setup is in [../eaglegate-sdls-sidecar/README.md](../eaglegate-sdls-sidecar/README.md).
+With `"crypto": {"backend": "sidecar"}`, each frame of an authenticating or encrypting SA goes to the `eaglegate-sdls-sidecar` container. Clear SAs are never sent. There, NASA CryptoLib 1.5.1 checks the MAC and/or decrypts the frame. Setup is in [sidecar/README.md](sidecar/README.md).
 
 **The channel:**
 - HMAC-SHA256 on every request and every answer, with the channel key from the COSMOS secret `EAGLEGATE_SIDECAR_KEY`. A fake sidecar can't claim "verified", and nothing else can use the sidecar to decrypt frames.

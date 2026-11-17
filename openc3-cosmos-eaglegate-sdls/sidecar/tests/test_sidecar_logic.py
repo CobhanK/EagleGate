@@ -6,9 +6,9 @@ import unittest
 from tests import _paths  # noqa: F401  (sys.path)
 
 import eaglegate_sdls_sidecar_protocol as wire
-from sidecar import config as cfg
-from sidecar import keys as key_info
-from sidecar.server import Sidecar, channel_keys_from_env
+from eaglegate_sidecar import config as cfg
+from eaglegate_sidecar import keys as key_info
+from eaglegate_sidecar.server import Sidecar, channel_keys_from_env
 
 KEY = bytes(range(32))
 OTHER_KEY = bytes(range(1, 33))

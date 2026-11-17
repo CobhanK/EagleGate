@@ -7,7 +7,7 @@ bytes come from CryptoLib's key interface and are wiped right after hashing.
 
 Known test keys: the fingerprints of every key in CryptoLib's built-in
 ("internal") key ring, which is published in CryptoLib's source. They are
-computed at image build time (python -m sidecar.keys --write) into
+computed at image build time (python -m eaglegate_sidecar.keys --write) into
 known_test_keys.json, so a sidecar with real keys still recognizes a test key.
 """
 import hashlib
@@ -88,7 +88,7 @@ def mask_coverage(sa, tm):
 def main(argv):
     """--write PATH: fingerprint CryptoLib's internal key ring (image build)."""
     if len(argv) != 2 or argv[0] != "--write":
-        print("usage: python -m sidecar.keys --write known_test_keys.json", file=sys.stderr)
+        print("usage: python -m eaglegate_sidecar.keys --write known_test_keys.json", file=sys.stderr)
         return 2
     from .engine import CryptoLibEngine
 

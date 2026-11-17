@@ -1,7 +1,7 @@
 """The messages between EagleGate and the CryptoLib sidecar (wire protocol v1).
 
 ONE definition for both ends: the sidecar image copies this file
-(eaglegate-sdls-sidecar/Dockerfile), the SidecarCrypto backend imports it.
+(sidecar/Dockerfile in this plugin), the SidecarCrypto backend imports it.
 Standard library only.
 
 Transport: TCP. Each message is a 4-byte big-endian length, then that many

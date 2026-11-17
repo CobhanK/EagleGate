@@ -1,10 +1,12 @@
 # EagleGate SDLS sidecar: NASA CryptoLib behind EagleGate's wire protocol.
 #
-# Build from the EagleGate folder (the image copies the wire protocol module
-# from the SDLS plugin, so both ends use one definition):
-#   ../eagle.sh build-sidecar            (or)
-#   docker build -f eaglegate-sdls-sidecar/Dockerfile -t eaglegate-sdls-sidecar .
-#   docker build -f eaglegate-sdls-sidecar/Dockerfile --target test -t eaglegate-sdls-sidecar:test . \
+# The build context is the SDLS plugin folder (the image copies the plugin's wire
+# protocol module, so both ends use one definition; Dockerfile.dockerignore keeps
+# everything else, including secrets/, out of the context). From the EagleGate folder:
+#   ./eagle.sh build-sidecar            (or)
+#   docker build -f openc3-cosmos-eaglegate-sdls/sidecar/Dockerfile -t eaglegate-sdls-sidecar openc3-cosmos-eaglegate-sdls
+#   docker build -f openc3-cosmos-eaglegate-sdls/sidecar/Dockerfile --target test \
+#     -t eaglegate-sdls-sidecar:test openc3-cosmos-eaglegate-sdls \
 #     && docker run --rm eaglegate-sdls-sidecar:test        (runs the tests against the real CryptoLib)
 #
 # Pinned (see EagleGate/SBOM.md): base image by digest, CryptoLib by release tag
@@ -30,7 +32,7 @@ RUN cmake -S cryptolib -B cryptolib/build \
  && cmake --build cryptolib/build -j"$(nproc)" \
  && mkdir -p /opt/eaglegate/lib \
  && cp "$(find cryptolib/build -name 'libcryptolib.so*' -type f | head -1)" /opt/eaglegate/lib/libcryptolib.so
-COPY eaglegate-sdls-sidecar/shim /src/shim
+COPY sidecar/shim /src/shim
 RUN gcc -O2 -fPIC -shared -Wall -Wextra -Werror -o /opt/eaglegate/lib/libeg_cryptolib.so shim/eg_cryptolib.c \
       -Icryptolib/include -L/opt/eaglegate/lib -lcryptolib -Wl,-rpath,'$ORIGIN' \
  && gcc -O2 -fPIC -shared -Wall -Wextra -Werror -o /opt/eaglegate/lib/libeg_test_apply.so shim/eg_test_apply.c \
@@ -42,9 +44,9 @@ RUN apt-get update \
  && rm -rf /var/lib/apt/lists/* \
  && useradd --system --uid 10001 --no-create-home --shell /usr/sbin/nologin sidecar
 COPY --from=build /opt/eaglegate/lib/libcryptolib.so /opt/eaglegate/lib/libeg_cryptolib.so /opt/eaglegate/lib/
-COPY openc3-cosmos-eaglegate-sdls/targets/EAGLEGATE_SDLS/lib/eaglegate_sdls_sidecar_protocol.py /opt/eaglegate/
-COPY eaglegate-sdls-sidecar/sidecar /opt/eaglegate/sidecar
-COPY eaglegate-sdls-sidecar/config /etc/eaglegate-sidecar
+COPY targets/EAGLEGATE_SDLS/lib/eaglegate_sdls_sidecar_protocol.py /opt/eaglegate/
+COPY sidecar/eaglegate_sidecar /opt/eaglegate/eaglegate_sidecar
+COPY sidecar/config /etc/eaglegate-sidecar
 ENV PYTHONPATH=/opt/eaglegate PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1
 WORKDIR /opt/eaglegate
 # Fingerprints of CryptoLib's published test keys, so even a sidecar with real
@@ -54,19 +56,19 @@ WORKDIR /opt/eaglegate
 # crashes when it cannot (fclose(NULL)). So the process runs in a scratch
 # directory of its own; mount a tmpfs there when the root filesystem is
 # read-only. The file holds the SA table (no key values) and is never read.
-RUN cd /tmp && python -m sidecar.keys --write /opt/eaglegate/known_test_keys.json \
+RUN cd /tmp && python -m eaglegate_sidecar.keys --write /opt/eaglegate/known_test_keys.json \
  && rm -f /tmp/sa_save_file.bin \
  && install -d -o 10001 -g 10001 -m 0700 /var/lib/eaglegate-sidecar
 WORKDIR /var/lib/eaglegate-sidecar
 USER 10001
 EXPOSE 7710
-HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 CMD ["python", "-m", "sidecar.health"]
-CMD ["python", "-m", "sidecar.server", "--config", "/etc/eaglegate-sidecar/sidecar.json"]
+HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=3 CMD ["python", "-m", "eaglegate_sidecar.health"]
+CMD ["python", "-m", "eaglegate_sidecar.server", "--config", "/etc/eaglegate-sidecar/sidecar.json"]
 
 FROM runtime AS test
 USER root
 COPY --from=build /opt/eaglegate/lib/libeg_test_apply.so /opt/eaglegate/lib/
-COPY eaglegate-sdls-sidecar/tests /opt/eaglegate/tests
+COPY sidecar/tests /opt/eaglegate/tests
 USER 10001
 HEALTHCHECK NONE
 CMD ["python", "-X", "faulthandler", "-m", "unittest", "discover", "-s", "/opt/eaglegate/tests", "-t", "/opt/eaglegate", "-v"]

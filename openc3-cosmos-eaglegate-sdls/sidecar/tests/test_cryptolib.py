@@ -13,8 +13,8 @@ import unittest
 from tests import _paths  # noqa: F401  (sys.path)
 
 import eaglegate_sdls_sidecar_protocol as wire
-from sidecar import config as cfg
-from sidecar import keys as key_info
+from eaglegate_sidecar import config as cfg
+from eaglegate_sidecar import keys as key_info
 
 LIB_DIR = "/opt/eaglegate/lib"
 HAVE_CRYPTOLIB = os.path.exists(os.path.join(LIB_DIR, "libeg_test_apply.so"))
@@ -39,7 +39,7 @@ class CryptoLibCase(unittest.TestCase):
 
     @classmethod
     def setUpClass(cls):
-        from sidecar.engine import CryptoLibEngine
+        from eaglegate_sidecar.engine import CryptoLibEngine
 
         cls.config = cfg.parse(cls.CONFIG) if cls.CONFIG else cfg.load(_paths.NOS3_CONFIG)
         cls.engine = CryptoLibEngine(cls.config)
@@ -206,8 +206,8 @@ class SidecarEndToEndTest(unittest.TestCase):
     """The protocol over the real engine (no sockets)."""
 
     def test_hello_info_process(self):
-        from sidecar.engine import CryptoLibEngine
-        from sidecar.server import Sidecar
+        from eaglegate_sidecar.engine import CryptoLibEngine
+        from eaglegate_sidecar.server import Sidecar
 
         config = cfg.load(_paths.NOS3_CONFIG)
         engine = CryptoLibEngine(config)
