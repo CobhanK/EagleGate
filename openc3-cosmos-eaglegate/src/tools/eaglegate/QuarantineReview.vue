@@ -510,6 +510,8 @@ function rememberedLimit() {
 export default {
   props: {
     interfaceName: { type: String, required: true },
+    // { stream, entry } from a FIREWALLREJECTIONS widget link: show that entry
+    focus: { type: Object, default: () => ({}) },
   },
   data() {
     return {
@@ -598,8 +600,17 @@ export default {
       this.timer = on ? setInterval(() => this.refresh(true), REFRESH_MS) : null
     },
   },
-  created() {
-    this.refresh()
+  async created() {
+    const entry = this.focus?.entry
+    if (entry) {
+      this.filters.stream = this.focus.stream || 'quarantine'
+      this.filters.search = entry // the search also matches entry ids
+    }
+    await this.refresh()
+    if (entry && this.entries.some((e) => e.id === entry)) {
+      this.expanded = [entry]
+      await this.loadExpanded([entry])
+    }
   },
   unmounted() {
     clearInterval(this.timer)

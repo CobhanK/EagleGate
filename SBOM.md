@@ -25,6 +25,10 @@ The quarantine review microservice (`microservices/EAGLEGATE_QUARANTINE/`, added
 
 The page's Quarantine tab adds no npm packages.
 
+The spike warning (`eaglegate_spike.py`, added 2026-11-16) uses only the standard library: its Poisson tail uses `math.lgamma` and `math.exp`, with no scipy.
+
+The `FIREWALLREJECTIONS` widget is built with the vite and `@vitejs/plugin-vue` already listed. It deliberately leaves out `vite-plugin-style-inject`, which COSMOS's widget generator would add, by using inline styles. It also doesn't import `@openc3/vue-common`. The built file imports only `vue`, which the page provides.
+
 ### Python: development only (tests and lint)
 
 | Package | Version | Why |

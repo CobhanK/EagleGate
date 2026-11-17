@@ -409,11 +409,14 @@ def test_link_status_items_fit_the_packet_definition(telemetry):
         "RECEIVED_COUNT"}
 
 
-def test_firewall_status_definition_is_the_core_one():
+@pytest.mark.parametrize("packet_name", ["FIREWALL_STATUS", "FIREWALL_RECENT"])
+def test_firewall_status_definition_is_the_core_one(packet_name):
+    """The firewall publishes these packets to whatever target it runs under, so
+    this target must define them exactly as the core does."""
     def block(path):
         with open(path) as f:
             text = f.read()
-        start = text.index("FIREWALL_STATUS BIG_ENDIAN")
+        start = text.index(f"{packet_name} BIG_ENDIAN")
         end = text.find("\nTELEMETRY", start)
         lines = text[start:end if end > 0 else None].splitlines()[1:]
         return [line for line in lines if line.strip() and not line.lstrip().startswith("#")]

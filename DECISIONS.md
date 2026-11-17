@@ -101,6 +101,58 @@ Each entry covers:
   - The list shows the most recent N entries, where N (1–1000, default 50) is set and remembered per browser, and filters by stream, stage, rule, APID, review state and text. One request scans at most 10,000 entries (the framed stream's cap); "Load older" continues from there.
 - **Why:** the admin needs to triage rejections and leave a record of the call, without writing to the streams themselves.
 
+### C9. The last 10 rejections are operator-visible telemetry (2026-11-16)
+- **Decision:**
+  - A new telemetry packet, `FIREWALL_RECENT`, carries the 10 most recent rejections: time, stage, rule, APID, TLM/CMD, the COSMOS packet name when recognised, sequence count, length, layer and link values, a reason cut to about 160 characters, and the quarantine entry id. It never carries packet bytes.
+  - Its text is cleaned by the C7 rules before it is published.
+  - Anyone who can view the target's telemetry can see it.
+- **Why:** the project owner accepted it (2026-11-16). The Telemetry Viewer is an operator tool. This widens C1 and C5 only from the last reason to the last 10. Bytes, review states and release stay admin-only.
+
+### C10. The recent-rejections widget lives in the core plugin (2026-11-16)
+- **Decision:**
+  - The `FIREWALLREJECTIONS` Telemetry Viewer widget is built in `openc3-cosmos-eaglegate` with a second vite config, next to the tool page.
+  - It adds no new npm packages: it uses inline styles and Vuetify classes, without `vite-plugin-style-inject`.
+- **Instead of:** a separate widget plugin.
+- **Why:** the project owner's choice, to keep the layout simple. COSMOS's custom-widget guide warns that a plugin holding a tool and a widget "may run into build issues". If that happens, record the fix here.
+- **As built:**
+  - A second vite config, `vite-FirewallrejectionsWidget.config.js` (`publicDir: false`), builds one 7 KB UMD file. Vue is its only import.
+  - The widget doesn't use the `@openc3/vue-common` Widget mixin. It declares the props the screen passes (`parameters`, `screenValues` and so on) and emits `addItem`/`deleteItem` itself. Importing the mixin would have bundled a large part of vue-common.
+  - `pnpm build` runs both builds; no build problems so far.
+  - A row links to `/tools/eaglegate?tab=quarantine&interface=&stream=&entry=`. The page checks each value and opens that entry, and the review service still decides who may see it.
+
+### C11. Spike warnings use COSMOS's own alert system (2026-11-16)
+- **Decision:**
+  - The firewall judges rejections in windows (`eaglegate_spike.py`). It publishes the result as `FIREWALL_STATUS SPIKE_STATE`, whose `STATE` colours (NORMAL GREEN, ELEVATED YELLOW, SPIKE RED) put it in COSMOS's limits system. COSMOS then:
+    - turns YELLOW into a notification in every tool's bell menu, and RED into an alert toast that stays until someone acknowledges it (the decom microservice's limits callback);
+    - shows the state in the Limits Monitor and on screens, and records limits events;
+    - can run a `LIMITS_RESPONSE`, or, in Enterprise, an Autonomic trigger.
+  - Alongside it, `REJECT_RATE`, `REJECT_BASELINE`, `SPIKE_REASON`, `SPIKE_TOP_RULE` and `SPIKE_SINCE`.
+  - When the state changes, the firewall logs one `notification` carrying the reason, and writes a `SPIKE` entry to the audit stream. It never logs its own `alert`: the RED state already raises one, and two toasts per spike would teach people to dismiss them.
+  - An example `LIMITS_RESPONSE` (`eaglegate_spike_limits_response.py`) is shipped, commented out under `SPIKE_STATE`, for anyone who wants a spike to act.
+  - **The detector** (standard methods only, Python standard library):
+    - an EWMA baseline (α = 0.05, floor 0.5 per window);
+    - a Poisson tail test, because normal counts are too small for a z-score;
+    - an absolute ceiling;
+    - a rejected-fraction test once a window has at least 10 packets;
+    - a security-failure count (authenticity and sequence rules, and the SDLS `sdls` layer);
+    - a tabular CUSUM (k = 0.5, h = 5) for slow rises. It adds up only windows the other tests call normal, and restarts when they fire.
+  - **Protections:**
+    - windows without traffic change nothing (gaps between passes);
+    - the baseline doesn't learn while the state is raised, and the ceiling always applies (against baseline poisoning);
+    - hysteresis: the state rises at once and falls after `spike_clear_windows` calm windows;
+    - new rules restart the baseline at the strict floor, and the reason mentions the change for 30 windows.
+  - Every threshold is an admin setting in the rules file's `settings` (`spike_*`), with a default, on the Rules tab (principle P1).
+  - A daemon ticker thread closes windows and publishes once a second, so a spike can clear while the link is silent. It shares a lock with the read thread for publishing.
+- **Instead of:**
+  - a separate alerting service or email sender: new code and dependencies, which P2 says to avoid;
+  - logging alerts directly: no Limits Monitor, Autonomic or `LIMITS_RESPONSE` hooks.
+- **Why:** the project owner asked for the warning to fit COSMOS's existing alert frameworks (2026-11-16).
+- **Known limits:**
+  - Toasts need a COSMOS page to be open. Unattended reactions need `LIMITS_RESPONSE` or Enterprise Autonomic.
+  - Operators with `system_set` can disable limits on the item. The notification and the audit entry are still written.
+  - Bytes discarded from an already untrusted connection don't count as rejections; `CONNECTION_UNTRUSTED` is RED on its own already.
+  - If rejections stay high for good (for example a rule that is too strict), the state stays raised until the cause is fixed or the settings are changed. This is by design.
+
 ## Rules editor
 
 ### R1. Supports Core and Enterprise (2026-10-17)

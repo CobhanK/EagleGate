@@ -38,6 +38,7 @@ class FakeValkey:
         self.status = []     # FIREWALL_STATUS item hashes
         self.link_status = []
         self.hashes = {}     # key -> {field: value}
+        self.recent = []     # item_hash of each FIREWALL_RECENT packet
         self.fail = False
 
     def _check(self):
@@ -54,11 +55,19 @@ class FakeValkey:
         message = json.loads(message_json)
         if message["packet_name"] == "FIREWALL_STATUS":
             self.status.append(message["item_hash"])
+        elif message["packet_name"] == "FIREWALL_RECENT":
+            self.recent.append(message["item_hash"])
         else:
             self.link_status.append(message["item_hash"])
 
     def stream(self, suffix):
         return [fields for stream, fields, _ in self.entries if stream.endswith(suffix)]
+
+
+@pytest.fixture(autouse=True)
+def no_ticker(monkeypatch):
+    """No background thread in tests (the core firewall's spike ticker)."""
+    monkeypatch.setattr(eaglegate_firewall_protocol.EaglegateFirewallProtocol, "TICKER_ENABLED", False)
 
 
 @pytest.fixture(autouse=True)
@@ -89,15 +98,15 @@ def log(monkeypatch):
 
     class FakeLogger:
         @staticmethod
-        def warn(msg):
+        def warn(msg, **kwargs):
             messages.append(("WARN", msg))
 
         @staticmethod
-        def info(msg):
+        def info(msg, **kwargs):
             messages.append(("INFO", msg))
 
         @staticmethod
-        def error(msg):
+        def error(msg, **kwargs):
             messages.append(("ERROR", msg))
 
     monkeypatch.setattr(eaglegate_firewall_protocol, "Logger", FakeLogger)

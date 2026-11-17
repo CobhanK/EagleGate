@@ -46,6 +46,10 @@ MICROSERVICE EAGLEGATE_QUARANTINE eaglegate-quarantine
   PORT <%= quarantine_port %>
   ROUTE_PREFIX /eaglegate-quarantine
 
+# Telemetry Viewer widget: the 10 most recent rejections and the spike warning
+# state. In a screen: FIREWALLREJECTIONS <TARGET> (see screens/firewall.txt)
+WIDGET FIREWALLREJECTIONS
+
 # Rules editor page (Tools menu). Viewing needs a login; applying changes needs
 # the admin role in COSMOS Enterprise (in Core, every logged in user can apply)
 TOOL eaglegate "EagleGate Firewall"

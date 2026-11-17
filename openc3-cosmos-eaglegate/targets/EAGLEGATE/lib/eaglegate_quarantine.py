@@ -53,7 +53,16 @@ STATUS_PACKET = "FIREWALL_STATUS"
 STATUS_ID_VERSION = 7  # see FIREWALL_STATUS in cmd_tlm/tlm.txt
 # Character limits of the STRING items in FIREWALL_STATUS (bit size / 8)
 STATUS_STRING_CHARS = {"LAST_TIME": 32, "LAST_STAGE": 12, "LAST_RULE_ID": 64,
-                       "LAST_APID": 8, "LAST_REASON": 256, "LAST_ENTRY_ID": 32}
+                       "LAST_APID": 8, "LAST_REASON": 256, "LAST_ENTRY_ID": 32,
+                       "SPIKE_REASON": 256, "SPIKE_TOP_RULE": 64, "SPIKE_SINCE": 32}
+
+# The last rejections as operator telemetry, for the FIREWALLREJECTIONS widget
+# (decision C9): no packet bytes, text cleaned (eaglegate_safe_text.py)
+RECENT_PACKET = "FIREWALL_RECENT"
+RECENT_ID_VERSION = 5  # see FIREWALL_RECENT in cmd_tlm/tlm.txt
+RECENT_COUNT = 10
+RECENT_JSON_BYTES = 4000  # the RECENT_JSON item is variable length; keep it bounded
+RECENT_REASON_CHARS = 160
 
 
 def stream_names(scope, interface_name):
@@ -271,14 +280,15 @@ class StatusPublisher(_Guarded):
         self.target_name = target_name
         self.published = 0
 
-    def publish(self, items):
-        """items: FIREWALL_STATUS item name -> converted value."""
+    def publish(self, items, packet_name=STATUS_PACKET):
+        """items: item name -> converted value, of FIREWALL_STATUS (completed by
+        status_items()) or of FIREWALL_RECENT (made by recent_items())."""
         if self._paused():
             return False
         message = {
             "target_name": self.target_name,
-            "packet_name": STATUS_PACKET,
-            "item_hash": status_items(items),
+            "packet_name": packet_name,
+            "item_hash": status_items(items) if packet_name == STATUS_PACKET else items,
             "type": "CONVERTED",
         }
         try:
@@ -304,3 +314,42 @@ def status_items(items):
             text = str(result[name]).encode("utf-8")[:chars]
             result[name] = text.decode("utf-8", "ignore")  # never split a character
     return result
+
+
+def recent_items(rejections):
+    """FIREWALL_RECENT items from the newest-first rejection summaries the
+    firewall keeps (eaglegate_firewall_protocol._quarantine). Reasons are cut
+    shorter until the JSON fits RECENT_JSON_BYTES."""
+    from eaglegate_safe_text import clean
+
+    source = list(rejections)[:RECENT_COUNT]
+    rows = []
+    for r in source:
+        rows.append({
+            "time": clean(r.get("time"), 32),
+            "interface": clean(r.get("interface"), 64),
+            "stage": clean(r.get("stage"), 12),
+            "rule_id": clean(r.get("rule_id") or "", 64),
+            "rule_type": clean(r.get("rule_type") or "", 32),
+            "layer": clean(r.get("layer") or "", 32),
+            "apid": clean(r.get("apid") or "", 8),
+            "packet_type": clean(r.get("packet_type") or "", 3),
+            "packet": clean(r.get("packet") or "", 80),
+            "seq_count": r.get("seq_count") if isinstance(r.get("seq_count"), int) else None,
+            "length": r.get("length") if isinstance(r.get("length"), int) else None,
+            "link": {clean(k, 32): clean(v, 64) for k, v in list((r.get("link") or {}).items())[:8]},
+            "reason": r.get("reason") or "",
+            "entry_id": clean(r.get("entry_id") or "", 32),
+        })
+    limit = RECENT_REASON_CHARS
+    while True:
+        for row, r in zip(rows, source):
+            row["reason"] = clean(r.get("reason") or "", limit)
+        text = json.dumps(rows, ensure_ascii=True, separators=(",", ":"))
+        if len(text) <= RECENT_JSON_BYTES or limit <= 16:
+            break
+        limit //= 2
+    while len(text) > RECENT_JSON_BYTES and rows:  # only with absurdly long names
+        rows.pop()
+        text = json.dumps(rows, ensure_ascii=True, separators=(",", ":"))
+    return {"CCSDS_VERSION": RECENT_ID_VERSION, "RECENT_COUNT": len(rows), "RECENT_JSON": text}

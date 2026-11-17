@@ -3,6 +3,7 @@ import time
 from dataclasses import dataclass, field
 
 from eaglegate_ccsds_header import CcsdsHeader
+from eaglegate_spike import DEFAULTS as SPIKE_DEFAULTS
 from eaglegate_verdict import DEFAULT, RULE, Verdict
 
 # The "settings" object of the rules file (eaglegate_rules_parser.SETTINGS_SCHEMA)
@@ -10,6 +11,8 @@ DEFAULT_SETTINGS = {
     # If a connection's FIRST packet is rejected, discard everything after it
     # until the interface reconnects or an admin restores trust
     "untrust_on_first_packet_reject": True,
+    # Spike warning (eaglegate_spike.py): alarm when rejections jump above normal
+    **SPIKE_DEFAULTS,
 }
 
 

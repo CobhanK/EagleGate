@@ -464,7 +464,9 @@ export function settingValue(doc, schema, key) {
 // Write a setting, leaving defaults out of the file so diffs stay small
 export function setSetting(doc, schema, key, value) {
   const settings = { ...(doc.settings || {}) }
-  if (value === schema.settings[key].default) delete settings[key]
+  // Equal to the default, or emptied: leave it out (the firewall uses the default)
+  if (value === undefined || value === schema.settings[key].default)
+    delete settings[key]
   else settings[key] = value
   if (Object.keys(settings).length) doc.settings = settings
   else delete doc.settings

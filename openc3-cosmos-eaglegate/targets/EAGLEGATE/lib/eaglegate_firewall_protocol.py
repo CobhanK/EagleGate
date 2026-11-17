@@ -40,6 +40,14 @@ Every packet judged, allowed or not, is also counted per APID
 (eaglegate_traffic.py): totals, bytes and sequence gaps, shown in
 FIREWALL_STATUS and the page's Link status tab.
 
+Spike warning (eaglegate_spike.py): rejections are also counted per window and
+compared with what is normal for the link. FIREWALL_STATUS SPIKE_STATE turns
+YELLOW or RED, which COSMOS's limits system turns into a notification or an
+alert. A ticker thread closes windows and publishes even when no bytes arrive.
+
+The last 10 rejections (no bytes, cleaned text) are published as the
+FIREWALL_RECENT packet for the FIREWALLREJECTIONS Telemetry Viewer widget.
+
 How the rules get loaded (eaglegate_rules_store.py has the storage keys and
 why they are admin-only):
 
@@ -82,6 +90,7 @@ packets. They use the "Extension API" methods below.
 Packets leaving this protocol are still UNIDENTIFIED; COSMOS identifies them
 afterwards in the interface microservice.
 """
+import threading
 import time
 from collections import deque
 
@@ -89,12 +98,14 @@ from eaglegate_admin_requests import NonceLog, RequestError, parse_request
 from eaglegate_ccsds_header import CCSDS_HEADER_BYTES, CcsdsHeader
 from eaglegate_extensions import FIREWALL_API_VERSION, collect_extensions, link_of
 from eaglegate_release import ReleaseError, check_entry, deliver, release_params
-from eaglegate_quarantine import RAW_CAPTURE_BYTES, QuarantineWriter, StatusPublisher, header_of, utc_now
+from eaglegate_quarantine import (RAW_CAPTURE_BYTES, RECENT_COUNT, RECENT_PACKET, QuarantineWriter, StatusPublisher,
+                                  header_of, recent_items, utc_now)
 from eaglegate_rules_error import RulesError
 from eaglegate_rules_parser import TOP_LEVEL_KEYS, parse_rules
 from eaglegate_rules_signing import RulesSigner
 from eaglegate_rules_store import RulesStore
 from eaglegate_ruleset import Ruleset
+from eaglegate_spike import SPIKE, STATE_NAMES, SpikeDetector
 from eaglegate_traffic import TrafficCounter
 from eaglegate_verdict import DEFAULT, ERROR, LINK, RULE, STRUCTURAL, UNTRUSTED, Verdict
 from openc3.environment import OPENC3_SCOPE
@@ -111,11 +122,15 @@ CCSDS_LENGTH_BYTES_PER_COUNT = 1
 RECENT_REJECTIONS = 20   # reasons kept for interface_details()
 RECENT_ADMIN_ACTIONS = 20
 STATUS_INTERVAL = 1.0    # seconds between FIREWALL_STATUS packets while rejecting
+TICK_SECONDS = 1.0       # how often the ticker thread closes spike windows and publishes
+NOTIFICATION = "notification"  # COSMOS Logger type: shown in every tool's notification menu
 
 
 class EaglegateFirewallProtocol(LengthProtocol):
     # Extensions look for this attribute to find the firewall on their interface
     EAGLEGATE_FIREWALL_API = FIREWALL_API_VERSION
+    TICKER_ENABLED = True  # tests switch the ticker thread off and call tick_spike() themselves
+    clock = staticmethod(time.monotonic)  # spike windows; tests replace it
 
     def __init__(
         self,
@@ -168,6 +183,11 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.status = None
         self.status_due = False            # counts changed since the last status packet
         self.status_sent_at = None
+        self.recent_due = True             # FIREWALL_RECENT changed (published once on first connect)
+        self.spike = SpikeDetector()       # rejection spike warning (eaglegate_spike.py)
+        self.publish_lock = threading.RLock()  # the read and ticker threads both publish
+        self.ticker = None
+        self.ticker_stop = threading.Event()
 
     # ---- reading packets -----------------------------------------------------
 
@@ -198,6 +218,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
                 verdict = Verdict(action="DENY", stage=ERROR, detail=f"rules engine error: {error}",
                                   rules_version=ruleset.version, rules_sha256=ruleset.sha256)
             self.traffic.record(data, verdict.action == "ALLOW")
+            self.spike.packet()
             if verdict.action == "ALLOW":
                 self.first_packet_decided = True
                 self.status_due = True  # PACKETS and ALLOWED changed; published at most once a second
@@ -251,6 +272,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
     def _record_rejection(self, verdict, data, link=None):
         self.rejected += 1
         self.rejected_by_stage[verdict.stage] = self.rejected_by_stage.get(verdict.stage, 0) + 1
+        self.spike.rejection(verdict)
         what = f"{len(data)} link-layer bytes" if verdict.stage == LINK else _apid(data)
         Logger.warn(f"{self._name()} firewall rejected {what}: {verdict.reason()} (total {self.rejected})")
         self._quarantine(verdict, data, link)
@@ -270,20 +292,28 @@ class EaglegateFirewallProtocol(LengthProtocol):
         header = header_of(verdict, data)
         rejection = {
             "time": time_text,
+            "interface": self._name(),
             "stage": verdict.stage,
             "rule_id": verdict.rule_id,
+            "rule_type": verdict.rule_type,
             "apid": f"0x{header.apid:03X}" if header else None,
             "seq_count": header.seq_count if header else None,
+            "packet_type": ("CMD" if header.packet_type else "TLM") if header else None,
+            "length": len(data),
             "layer": verdict.layer or None,
             "link": link,
             "reason": verdict.reason(),
             "entry_id": entry_id,  # None if it could not be stored
         }
+        if verdict.framed:
+            # Kept only until FIREWALL_RECENT names the packet (_name_recent); never shown
+            rejection["_data"] = bytes(data)
         self.recent.append(rejection)
         if verdict.stage != UNTRUSTED:
             # Discarded bytes are a consequence: keep showing the rejection that caused it
             self.last_rejection = rejection
         self.status_due = True
+        self.recent_due = True
 
     def _quarantine_writer(self):
         if self.quarantine is None:
@@ -447,19 +477,90 @@ class EaglegateFirewallProtocol(LengthProtocol):
     # ---- status packet -------------------------------------------------------
 
     def _publish_status_if_due(self, force=False):
-        """Publish FIREWALL_STATUS when something changed, at most once per
-        STATUS_INTERVAL, so a flood of rejections cannot flood telemetry too."""
-        now = time.monotonic()
-        if not force:
-            if not self.status_due:
-                return
-            if self.status_sent_at is not None and now - self.status_sent_at < STATUS_INTERVAL:
-                return
-        if self.status is None:
-            self.status = StatusPublisher(self.scope, self.target_name)
-        self.status_sent_at = now
-        # A failed publish stays due, so the screen catches up once publishing works again
-        self.status_due = not self.status.publish(self.status_items())
+        """Publish FIREWALL_STATUS (and FIREWALL_RECENT) when something changed, at
+        most once per STATUS_INTERVAL, so a flood of rejections cannot flood
+        telemetry too. Runs on the read thread and the ticker thread."""
+        with self.publish_lock:
+            if self.tick_spike():
+                force = True  # the spike state changed: screens and COSMOS limits must see it now
+            now = time.monotonic()
+            if not force:
+                if not (self.status_due or self.recent_due):
+                    return
+                if self.status_sent_at is not None and now - self.status_sent_at < STATUS_INTERVAL:
+                    return
+            if self.status is None:
+                self.status = StatusPublisher(self.scope, self.target_name)
+            self.status_sent_at = now
+            # A failed publish stays due, so the screen catches up once publishing works again
+            if self.status_due or force:
+                self.status_due = not self.status.publish(self.status_items())
+            if self.recent_due:
+                self._name_recent()
+                self.recent_due = not self.status.publish(recent_items(reversed(self.recent)), RECENT_PACKET)
+
+    def tick_spike(self, now=None):
+        """Close finished spike windows. Returns True when the state changed.
+        `now` (monotonic seconds) is only passed in by tests."""
+        closed = self.spike.closed
+        change = self.spike.tick(self.ruleset.settings, self.clock() if now is None else now)
+        if self.spike.closed != closed:
+            self.status_due = True  # REJECT_RATE changed
+        if change is None:
+            return False
+        old, new = change
+        info = self.spike.describe()
+        if new > old:
+            text = f"{self._name()} firewall: rejections {STATE_NAMES[new]}: {info['reason']}"
+        else:
+            text = f"{self._name()} firewall: rejection spike {STATE_NAMES[new].lower()}: {info['reason']}"
+        # A notification (the bell menu), never an alert: the RED SPIKE_STATE already
+        # raises COSMOS's alert, and two toasts per spike would train people to dismiss them
+        (Logger.error if new == SPIKE else Logger.warn)(text, type=NOTIFICATION)
+        self._quarantine_writer().audit({
+            "time": utc_now(), "action": "SPIKE", "ok": True, "detail": text,
+            "state": STATE_NAMES[new], "previous_state": STATE_NAMES[old],
+            "reason": info["reason"], "top": info["top"], "since": info["since"] or "",
+        })
+        return True
+
+    def _name_recent(self):
+        """Name the COSMOS packet of the rejections FIREWALL_RECENT will show, then
+        forget their bytes. Only these few, so a flood costs nothing extra."""
+        for rejection in list(self.recent)[-RECENT_COUNT:]:
+            data = rejection.pop("_data", None)
+            if data is not None:
+                rejection["packet"] = self._packet_name(data)
+
+    def _packet_name(self, data):
+        """"TARGET PACKET" when COSMOS recognises the bytes as telemetry of this
+        interface's targets, "unknown" when it does not, "" when it cannot say."""
+        try:
+            from openc3.system.system import System
+
+            names = list(getattr(self.interface, "tlm_target_names", None) or [])
+            if not names:
+                return ""
+            packet = System.telemetry.identify(data, names)
+        except Exception:
+            return ""
+        return f"{packet.target_name} {packet.packet_name}" if packet else "unknown"
+
+    def _start_ticker(self):
+        """A daemon thread that closes spike windows and publishes, so a spike can
+        clear (and the screens update) while the link is silent."""
+        if not self.TICKER_ENABLED or self.ticker is not None:
+            return
+
+        def run():
+            while not self.ticker_stop.wait(TICK_SECONDS):
+                try:
+                    self._publish_status_if_due()
+                except Exception as error:  # never let the ticker die silently
+                    Logger.error(f"{self._name()} firewall: spike ticker: {type(error).__name__}: {error}")
+
+        self.ticker = threading.Thread(target=run, name=f"eaglegate-ticker-{self._name()}", daemon=True)
+        self.ticker.start()
 
     def status_items(self):
         """FIREWALL_STATUS item values (see cmd_tlm/tlm.txt)."""
@@ -476,6 +577,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "DENIED_LINK": _u32(self.rejected_by_stage[LINK]),
             "TRUST_RESTORES": _u32(self.trust_restores),
             "RELEASED": _u32(self.released),
+            **self.spike.status(),
             "PACKETS": _u32(self.traffic.packets),
             "ALLOWED": _u32(self.traffic.allowed),
             "SEQ_GAPS": _u32(self.traffic.seq_gaps),
@@ -512,6 +614,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.connection_id += 1  # counts attempts; only connected ones get quarantine entries
         self.traffic.new_connection()
         self.load_active()
+        self._start_ticker()
         # Publish only what screens would see change, not once per retry of a dead link
         if self.status_sent_at is None or was_untrusted or self.ruleset is not old_ruleset:
             self._publish_status_if_due(force=True)
@@ -633,6 +736,9 @@ class EaglegateFirewallProtocol(LengthProtocol):
         old_version = self.ruleset.version
         # A single assignment: read_data sees the old or the new set, never a mix
         self.ruleset = new_ruleset
+        # What was normal under the old rules says nothing about the new ones; start
+        # strict (more warnings, never fewer), and say so if a spike follows
+        self.spike.rules_changed(new_ruleset.version)
         self.rules_loaded_at = utc_now()
         Logger.info(
             f"{self._name()} firewall: rules version {old_version} -> {new_ruleset.version} "
@@ -673,6 +779,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "rejected_by_stage": dict(self.rejected_by_stage),
             "discarded_bytes": self.discarded_bytes,
             "traffic": self.traffic.describe(),
+            "spike": self.spike.describe(),
             "connection_untrusted": self.connection_untrusted,
             "untrusted_since": self.untrusted_since,
             "untrusted_cause": self.untrusted_cause,
@@ -688,7 +795,8 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "max_length": self.fw_max_length,
             "quarantine": {
                 **(self.quarantine.summary() if self.quarantine else {}),
-                "recent": list(reversed(self.recent)),  # newest first; reasons only, no bytes
+                # newest first; reasons only, no bytes
+                "recent": [{k: v for k, v in r.items() if not k.startswith("_")} for r in reversed(self.recent)],
             },
             "status_packet": {
                 "published": self.status.published if self.status else 0,

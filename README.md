@@ -51,7 +51,11 @@ Every rejected packet is stored with the reason, in capped Valkey streams per in
 - **Review:** mark entries reviewed, false positive, threat or dismissed, with a note.
 - **Release:** send a wrongly rejected packet on into COSMOS. This is once per entry, audited, and the rules are not checked again.
 
-The tab needs the `EAGLEGATE_QUARANTINE` microservice that the core plugin installs. Only COSMOS admins can use it; the COSMOS server decides. Details are in `openc3-cosmos-eaglegate/targets/EAGLEGATE/README.md` (section 6) and in decisions C5–C8 of `DECISIONS.md`.
+Operators see the last 10 rejections (no bytes) with the **`FIREWALLREJECTIONS`** Telemetry Viewer widget (`FIREWALLREJECTIONS EAGLEGATE` in a screen; it is on the shipped Firewall screen).
+
+A **spike warning** compares each 10-second window's rejections with what is normal for the link. ELEVATED raises a COSMOS notification and SPIKE a COSMOS alert, through COSMOS's own limits system (`FIREWALL_STATUS SPIKE_STATE`). The thresholds are settings on the Rules tab.
+
+The tab needs the `EAGLEGATE_QUARANTINE` microservice that the core plugin installs. Only COSMOS admins can use it; the COSMOS server decides. Details are in `openc3-cosmos-eaglegate/targets/EAGLEGATE/README.md` (sections 6 and 6a) and in decisions C5–C11 of `DECISIONS.md`.
 
 ## SDLS extension (`openc3-cosmos-eaglegate-sdls`)
 A second plugin that sits in front of the firewall. It receives SDLS-protected CCSDS TM transfer frames, checks them (spacecraft and virtual channel, SPI binding, anti-replay, frame counts) and hands the packets to the firewall. Packet rules can then match on `"link": {"vcid": ..., "spi": ..., "protection": ...}`. Install the core plugin first; build with `./EagleGate/eagle.sh build-sdls -v 1.x.x` (or `build-core-sdls` for both plugins, `build-all` for both plugins and the sidecar). Setup, including NOS3, is in `openc3-cosmos-eaglegate-sdls/README.md`.

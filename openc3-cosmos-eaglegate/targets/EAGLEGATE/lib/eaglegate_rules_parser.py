@@ -52,7 +52,7 @@ from eaglegate_rule_types import AuthenticityRule, RangeRule, RateRule, Sequence
 from eaglegate_text import ENCODINGS, FORMULA_START, SHELL_AND_MARKUP, TEXT_PROFILES
 from eaglegate_rules_error import RulesError
 from eaglegate_ruleset import DEFAULT_SETTINGS, Ruleset
-from eaglegate_validate import no_unknown_keys, require
+from eaglegate_validate import no_unknown_keys, require, to_int, to_number
 
 RULE_TYPES = {cls.TYPE: cls for cls in (MatchRule, RangeRule, SequenceRule, RateRule, AuthenticityRule, TextRule)}
 ACTIONS = ("ALLOW", "DENY")
@@ -70,6 +70,49 @@ SETTINGS_SCHEMA = {
                 "until the interface reconnects or an admin restores trust (a sender that starts wrong "
                 "is probably not the spacecraft). off: each packet is judged on its own. Turn it off "
                 "behind an extension that already checks the sender, such as the SDLS frame layer",
+    },
+    # Spike warning (eaglegate_spike.py; decision C11)
+    "spike_detection": {
+        "type": "bool", "default": DEFAULT_SETTINGS["spike_detection"],
+        "title": "Warn when rejections spike",
+        "help": "compares each window's rejections with what is normal for this link and sets "
+                "FIREWALL_STATUS SPIKE_STATE: ELEVATED (yellow, a COSMOS notification) or SPIKE "
+                "(red, a COSMOS alert that must be acknowledged)",
+    },
+    "spike_window_seconds": {
+        "type": "int", "min": 2, "max": 300, "default": DEFAULT_SETTINGS["spike_window_seconds"],
+        "title": "Spike window (seconds)",
+        "help": "rejections are counted per window of this length",
+    },
+    "spike_ceiling": {
+        "type": "int", "min": 1, "max": 1000000, "default": DEFAULT_SETTINGS["spike_ceiling"],
+        "title": "Spike ceiling (rejections per window)",
+        "help": "this many rejections in one window is always a SPIKE, whatever is normal",
+    },
+    "spike_elevated_p": {
+        "type": "number", "min_exclusive": 0, "max": 0.5, "default": DEFAULT_SETTINGS["spike_elevated_p"],
+        "title": "ELEVATED when a window is less likely than",
+        "help": "probability of so many rejections in a normal window (Poisson); smaller = fewer warnings",
+    },
+    "spike_p": {
+        "type": "number", "min_exclusive": 0, "max": 0.5, "default": DEFAULT_SETTINGS["spike_p"],
+        "title": "SPIKE when a window is less likely than",
+        "help": "must be smaller than the ELEVATED probability",
+    },
+    "spike_max_fraction": {
+        "type": "number", "min_exclusive": 0, "max": 1, "default": DEFAULT_SETTINGS["spike_max_fraction"],
+        "title": "ELEVATED when this share of packets is rejected",
+        "help": "0..1, counted once a window has at least 10 packets",
+    },
+    "spike_critical_count": {
+        "type": "int", "min": 1, "max": 1000000, "default": DEFAULT_SETTINGS["spike_critical_count"],
+        "title": "ELEVATED after this many security failures in a window",
+        "help": "authenticity or sequence rule rejections, and SDLS MAC, anti-replay or SPI rejections",
+    },
+    "spike_clear_windows": {
+        "type": "int", "min": 1, "max": 100, "default": DEFAULT_SETTINGS["spike_clear_windows"],
+        "title": "Calm windows before the warning clears",
+        "help": "a raised state falls only after this many calmer windows in a row",
     },
 }
 
@@ -130,9 +173,26 @@ def _parse_settings(raw):
     no_unknown_keys(raw, SETTINGS_SCHEMA, "settings")
     settings = dict(DEFAULT_SETTINGS)
     for key, value in raw.items():
-        require(isinstance(value, bool), f"settings.{key} must be true or false")
-        settings[key] = value
+        settings[key] = _setting(SETTINGS_SCHEMA[key], value, f"settings.{key}")
+    require(settings["spike_p"] < settings["spike_elevated_p"],
+            "settings.spike_p must be smaller than settings.spike_elevated_p")
     return settings
+
+
+def _setting(spec, value, where):
+    """One settings value, checked against its SETTINGS_SCHEMA entry."""
+    if spec["type"] == "bool":
+        require(isinstance(value, bool), f"{where} must be true or false")
+        return value
+    if spec["type"] == "int":
+        return to_int(value, where, spec["min"], spec["max"])
+    value = to_number(value, where)
+    if "min_exclusive" in spec:
+        require(value > spec["min_exclusive"], f"{where} must be greater than {spec['min_exclusive']}")
+    if "min" in spec:
+        require(value >= spec["min"], f"{where} must be at least {spec['min']}")
+    require(value <= spec["max"], f"{where} must be at most {spec['max']}")
+    return value
 
 
 def _parse_rule(raw, where, link_keys=None):

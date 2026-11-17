@@ -335,3 +335,29 @@ test('compact diff keeps changes with context and folds unchanged runs', () => {
   ])
   assert.deepEqual(compactDiff([]), [])
 })
+
+test('spike settings are validated like the firewall does', () => {
+  const ok = { version: 1, default_action: 'DENY', rules: [] }
+  assert.deepEqual(
+    validate(
+      {
+        ...ok,
+        settings: { spike_window_seconds: 30, spike_max_fraction: 0.3 },
+      },
+      schema,
+    ),
+    [],
+  )
+  assert.ok(
+    validate({ ...ok, settings: { spike_window_seconds: 1 } }, schema).length,
+  )
+  assert.ok(
+    validate({ ...ok, settings: { spike_max_fraction: 0 } }, schema).length,
+  )
+  const d = { ...ok }
+  setSetting(d, schema, 'spike_ceiling', 50)
+  assert.equal(settingValue(d, schema, 'spike_ceiling'), 50)
+  setSetting(d, schema, 'spike_ceiling', undefined) // the field was emptied
+  assert.equal(d.settings, undefined)
+  assert.equal(settingValue(d, schema, 'spike_ceiling'), 100)
+})

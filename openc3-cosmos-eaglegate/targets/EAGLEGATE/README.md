@@ -233,6 +233,40 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
     - writes the packet to COSMOS telemetry tagged `extra.eaglegate_released`, and audits it.
     
     `FIREWALL_STATUS.RELEASED` counts releases.
+- **Recent rejections for operators** (decision C9):
+  - The `FIREWALL_RECENT` packet carries the last 10 rejections as JSON in `RECENT_JSON`: time, interface, stage, rule, APID, TLM/CMD, the COSMOS packet name, sequence count, length, layer and link values, the reason (about 160 characters) and the quarantine entry id. It never carries bytes.
+  - Text is cleaned by `lib/eaglegate_safe_text.py`.
+  - It is published at most once a second, only when the list changed.
+  - Its ID is CCSDS version 5, so no received packet can claim to be it.
+- **`FIREWALLREJECTIONS` widget** (`src/widgets/`, decision C10): put `FIREWALLREJECTIONS EAGLEGATE` in any Telemetry Viewer screen (the shipped `screens/firewall.txt` has it).
+  - It shows the 10 rows and the spike state.
+  - Each row links to its entry on the Quarantine tab, which only admins can open.
+  - Use `EAGLEGATE_SDLS` as the target for SDLS interfaces.
+
+## 6a. Spike warning (decision C11)
+
+`lib/eaglegate_spike.py` counts rejections per window (`spike_window_seconds`, default 10 s) and compares each window with what is normal for the link.
+
+| State | When | What COSMOS does |
+|---|---|---|
+| NORMAL (green) | otherwise | nothing |
+| ELEVATED (yellow) | a window is unlikely for this link (Poisson P < `spike_elevated_p`), or `spike_max_fraction` of at least 10 packets is rejected, or there are `spike_critical_count` security failures, or CUSUM sees a slow rise | a **notification** in every tool's bell menu |
+| SPIKE (red) | P < `spike_p`, or `spike_ceiling` rejections in one window | an **alert** toast that stays until someone acknowledges it |
+
+- **How the alarm is raised:**
+  - `FIREWALL_STATUS SPIKE_STATE` uses STATE colours, so COSMOS's limits system raises the notification or alert. It also shows the state in the Limits Monitor and on screens, and records limits events.
+  - The firewall adds one notification with the reason (for example "42 rejections in 10 s, normal 0.5; …; mostly auth-hk (40)") and an audit-stream `SPIKE` entry.
+  - The figures are in `REJECT_RATE` and `REJECT_BASELINE` (per minute), `SPIKE_REASON`, `SPIKE_TOP_RULE` and `SPIKE_SINCE`.
+- **Settings:** all `spike_*` settings are on the Rules tab, each with a default. `spike_detection: false` turns the warning off.
+- **How it behaves:**
+  - Windows with no traffic change nothing.
+  - The baseline doesn't learn during a spike.
+  - New rules restart the baseline strict.
+  - A raised state clears after `spike_clear_windows` calm windows.
+  - A ticker thread closes windows even when the link is silent.
+- **To act on a spike:**
+  - uncomment `LIMITS_RESPONSE eaglegate_spike_limits_response.py` under `SPIKE_STATE` in `cmd_tlm/tlm.txt` and edit that file (it runs in the decom microservice, with no page needed);
+  - or, in COSMOS Enterprise, create an Autonomic trigger on `FIREWALL_STATUS SPIKE_STATE == 'SPIKE'`, with a reaction that notifies or runs a procedure.
 
 ## 7. Key classes and objects
 

@@ -504,6 +504,68 @@
     }
   },
   "settings": {
+    "spike_ceiling": {
+      "default": 100,
+      "help": "this many rejections in one window is always a SPIKE, whatever is normal",
+      "max": 1000000,
+      "min": 1,
+      "title": "Spike ceiling (rejections per window)",
+      "type": "int"
+    },
+    "spike_clear_windows": {
+      "default": 3,
+      "help": "a raised state falls only after this many calmer windows in a row",
+      "max": 100,
+      "min": 1,
+      "title": "Calm windows before the warning clears",
+      "type": "int"
+    },
+    "spike_critical_count": {
+      "default": 3,
+      "help": "authenticity or sequence rule rejections, and SDLS MAC, anti-replay or SPI rejections",
+      "max": 1000000,
+      "min": 1,
+      "title": "ELEVATED after this many security failures in a window",
+      "type": "int"
+    },
+    "spike_detection": {
+      "default": true,
+      "help": "compares each window's rejections with what is normal for this link and sets FIREWALL_STATUS SPIKE_STATE: ELEVATED (yellow, a COSMOS notification) or SPIKE (red, a COSMOS alert that must be acknowledged)",
+      "title": "Warn when rejections spike",
+      "type": "bool"
+    },
+    "spike_elevated_p": {
+      "default": 0.01,
+      "help": "probability of so many rejections in a normal window (Poisson); smaller = fewer warnings",
+      "max": 0.5,
+      "min_exclusive": 0,
+      "title": "ELEVATED when a window is less likely than",
+      "type": "number"
+    },
+    "spike_max_fraction": {
+      "default": 0.5,
+      "help": "0..1, counted once a window has at least 10 packets",
+      "max": 1,
+      "min_exclusive": 0,
+      "title": "ELEVATED when this share of packets is rejected",
+      "type": "number"
+    },
+    "spike_p": {
+      "default": 0.0001,
+      "help": "must be smaller than the ELEVATED probability",
+      "max": 0.5,
+      "min_exclusive": 0,
+      "title": "SPIKE when a window is less likely than",
+      "type": "number"
+    },
+    "spike_window_seconds": {
+      "default": 10,
+      "help": "rejections are counted per window of this length",
+      "max": 300,
+      "min": 2,
+      "title": "Spike window (seconds)",
+      "type": "int"
+    },
     "untrust_on_first_packet_reject": {
       "default": true,
       "help": "on: if the first packet of a connection is rejected, every later byte is discarded until the interface reconnects or an admin restores trust (a sender that starts wrong is probably not the spacecraft). off: each packet is judged on its own. Turn it off behind an extension that already checks the sender, such as the SDLS frame layer",

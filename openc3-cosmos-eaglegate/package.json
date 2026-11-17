@@ -5,8 +5,8 @@
   "type": "module",
   "scripts": {
     "serve": "vite build --watch --mode dev-server",
-    "build": "vite build",
-    "lint": "eslint src",
+    "build": "vite build && vite build -c vite-FirewallrejectionsWidget.config.js",
+    "lint": "eslint src vite-FirewallrejectionsWidget.config.js",
     "test": "node --test 'src/**/*.test.js'",
     "serve:standalone": "vite preview --mode standalone"
   },

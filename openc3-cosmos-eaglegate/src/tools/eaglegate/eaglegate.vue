@@ -97,6 +97,7 @@
     <quarantine-review
       v-if="tab === 'quarantine'"
       :interface-name="interfaceName"
+      :focus="focus"
     />
 
     <!-- Live counts, extension panels and admin actions; polls only while shown -->
@@ -301,12 +302,10 @@
               cols="12"
               md="6"
             >
-              <v-switch
+              <schema-field
+                :spec="spec"
                 :model-value="settingValue(doc, schema, key)"
                 :label="spec.title || key"
-                :hint="spec.help"
-                persistent-hint
-                color="primary"
                 :readonly="readonly"
                 @update:model-value="setSetting(doc, schema, key, $event)"
               />
@@ -636,6 +635,7 @@
 import { TopBar } from '@openc3/vue-common/components'
 import LinkStatus from './LinkStatus.vue'
 import QuarantineReview from './QuarantineReview.vue'
+import { quarantineFocus } from '../../widgets/recentRejections.js'
 import RuleEditor from './RuleEditor.vue'
 import SchemaField from './SchemaField.vue'
 import { reasonProblem } from './adminRequest.js'
@@ -707,6 +707,7 @@ export default {
       history: { open: false, items: [] },
       trust: { open: false, reason: '', busy: false },
       tab: 'rules',
+      focus: {}, // ?tab=quarantine&interface=&stream=&entry= (FIREWALLREJECTIONS widget links)
       fullDiff: false, // review dialog: whole file instead of only the changes
     }
   },
@@ -830,9 +831,23 @@ export default {
       return
     }
     await this.findInterfaces()
+    this.applyFocus()
     await this.load()
   },
   methods: {
+    // A link from the FIREWALLREJECTIONS widget: open that entry's interface on
+    // the Quarantine tab (the review service still decides who may see it)
+    applyFocus() {
+      const focus = quarantineFocus(window.location.search)
+      if (!focus.tab) return
+      if (
+        focus.interface &&
+        this.interfaces.some((i) => i.name === focus.interface)
+      )
+        this.interfaceName = focus.interface
+      this.focus = focus
+      this.tab = 'quarantine'
+    },
     settingValue,
     setSetting,
     reasonProblem,
