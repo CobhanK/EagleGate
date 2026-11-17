@@ -53,6 +53,16 @@
               @update:model-value="setEnabled"
             />
           </v-col>
+          <v-col v-if="rule.action === 'DENY'" cols="12">
+            <v-switch
+              :model-value="rule.monitor === true"
+              label="Monitor only: record what this rule would deny, but let the rules below decide"
+              color="warning"
+              hide-details
+              :readonly="readonly"
+              @update:model-value="setMonitor"
+            />
+          </v-col>
         </v-row>
         <div class="text-caption mb-4">{{ typeSpec.description }}</div>
 
@@ -575,6 +585,10 @@ export default {
     setEnabled(on) {
       if (on) delete this.rule.enabled
       else this.rule.enabled = false
+    },
+    setMonitor(on) {
+      if (on) this.rule.monitor = true
+      else delete this.rule.monitor
     },
     setLink(key, values) {
       const link = { ...(this.rule.match.link || {}) }

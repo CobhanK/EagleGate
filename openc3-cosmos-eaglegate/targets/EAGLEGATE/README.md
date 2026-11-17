@@ -222,7 +222,89 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
   - Continuity starts over on each connection. Totals run from interface start.
   - `FIREWALL_STATUS` carries `PACKETS`, `ALLOWED` and `SEQ_GAPS`, published at most once a second while traffic flows. The full table is in `interface_details` under `firewall.traffic`.
 - `interface_details("EAGLEGATE_INT")` also shows the rule hit counts, where the rules came from, the load and save errors, and the last 20 rejection reasons.
-- **Not built yet:** the review and release tool. The name `QUARANTINE_REVIEW` is reserved in `stream_names()`. Stream contents are admin-only.
+- **Review and release** (decisions C5–C8 in `EagleGate/DECISIONS.md`), on the EagleGate page's **Quarantine** tab. It is for admins only.
+  - **The review microservice** (`microservices/EAGLEGATE_QUARANTINE/`, standard library only) serves `/eaglegate-quarantine/entries`, `/entry` and `/review`. It asks the COSMOS server whether each caller is an admin by forwarding their token to the admin-only `GET /openc3-api/secrets`.
+  - **The list** shows the most recent N entries (N is 1–1000, set on the page), filtered by stream, stage, rule id, APID, review state or text. Each row expands to show the metadata, the decoded CCSDS header, link values and a hex/ASCII dump.
+  - **Text is made safe:** the microservice escapes control and invisible characters and sends the bytes only as hex. The page never uses `v-html`.
+  - **Review states:** `reviewed`, `false_positive`, `threat`, `dismissed`, or `new` to clear. They go in `…QUARANTINE_REVIEW__<iface>`, and each change writes an audit entry.
+  - **Release:** `RELEASE <request sha256>` (`lib/eaglegate_release.py`) is an admin request like Restore trust. It names the entry id and the sha256 of its bytes. The firewall:
+    - releases only whole framed entries, at most once each (HSETNX in `…QUARANTINE_RELEASED__<iface>`);
+    - does not check the rules again;
+    - writes the packet to COSMOS telemetry tagged `extra.eaglegate_released`, and audits it.
+    
+    `FIREWALL_STATUS.RELEASED` counts releases.
+- **Recent rejections for operators** (decision C9):
+  - The `FIREWALL_RECENT` packet carries the last 10 rejections as JSON in `RECENT_JSON`: time, interface, stage, rule, APID, TLM/CMD, the COSMOS packet name, sequence count, length, layer and link values, the reason (about 160 characters) and the quarantine entry id. It never carries bytes.
+  - Text is cleaned by `lib/eaglegate_safe_text.py`.
+  - It is published at most once a second, only when the list changed.
+  - Its ID is CCSDS version 5, so no received packet can claim to be it.
+- **`FIREWALLREJECTIONS` widget** (`src/widgets/`, decision C10): put `FIREWALLREJECTIONS EAGLEGATE` in any Telemetry Viewer screen (the shipped `screens/firewall.txt` has it).
+  - It shows the 10 rows and the spike state.
+  - Each row links to its entry on the Quarantine tab, which only admins can open.
+  - Use `EAGLEGATE_SDLS` as the target for SDLS interfaces.
+
+## 6a. Spike warning (decision C11)
+
+`lib/eaglegate_spike.py` counts rejections per window (`spike_window_seconds`, default 10 s) and compares each window with what is normal for the link.
+
+| State | When | What COSMOS does |
+|---|---|---|
+| NORMAL (green) | otherwise | nothing |
+| ELEVATED (yellow) | a window is unlikely for this link (Poisson P < `spike_elevated_p`), or `spike_max_fraction` of at least 10 packets is rejected, or there are `spike_critical_count` security failures, or CUSUM sees a slow rise | a **notification** in every tool's bell menu |
+| SPIKE (red) | P < `spike_p`, or `spike_ceiling` rejections in one window | an **alert** toast that stays until someone acknowledges it |
+
+- **How the alarm is raised:**
+  - `FIREWALL_STATUS SPIKE_STATE` uses STATE colours, so COSMOS's limits system raises the notification or alert. It also shows the state in the Limits Monitor and on screens, and records limits events.
+  - The firewall adds one notification with the reason (for example "42 rejections in 10 s, normal 0.5; …; mostly auth-hk (40)") and an audit-stream `SPIKE` entry.
+  - The figures are in `REJECT_RATE` and `REJECT_BASELINE` (per minute), `SPIKE_REASON`, `SPIKE_TOP_RULE` and `SPIKE_SINCE`.
+- **Settings:** all `spike_*` settings are on the Rules tab, each with a default. `spike_detection: false` turns the warning off.
+- **How it behaves:**
+  - Windows with no traffic change nothing.
+  - The baseline doesn't learn during a spike.
+  - New rules restart the baseline strict.
+  - A raised state clears after `spike_clear_windows` calm windows.
+  - A ticker thread closes windows even when the link is silent.
+- **To act on a spike:**
+  - uncomment `LIMITS_RESPONSE eaglegate_spike_limits_response.py` under `SPIKE_STATE` in `cmd_tlm/tlm.txt` and edit that file (it runs in the decom microservice, with no page needed);
+  - or, in COSMOS Enterprise, create an Autonomic trigger on `FIREWALL_STATUS SPIKE_STATE == 'SPIKE'`, with a reaction that notifies or runs a procedure.
+
+## 6b. Monitor mode (decision C12)
+
+- **Whole rule set:** set `"settings": {"enforcement": "monitor"}`, or pick Enforcement: monitor on the Rules tab.
+  - Every packet the rules would deny is delivered. It is also quarantined as "WOULD DENY (monitor)", never releasable, and counted in `FIREWALL_STATUS MONITORED`.
+  - `ENFORCEMENT` turns yellow, which raises a COSMOS notification, and the page shows a banner.
+- **One rule:** add `"monitor": true` to a DENY rule ("Monitor only" in the rule editor).
+  - When it fires, the would-be denial is recorded and the rules below decide the packet.
+  - `MONITOR_RULES` counts these rules.
+- **Monitor shows what enforce would do:**
+  - would-be denials don't teach the sequence or rate rules;
+  - a first packet that would be denied doesn't untrust the connection.
+- **Still enforced:** the structural header check and SDLS's own checks (SDLS has its own `mode`).
+- **Typical rollout:** apply the new rule with `"monitor": true`. Watch the Quarantine tab, the widget or the "WOULD DENY" entries. Then switch it off.
+
+## 6c. Audit log, retention and export (decisions C13, C14, C15)
+
+The **Audit log** tab (admins only) lists the audit stream newest first, with filters for action, outcome and text. Each entry expands to show every field. Export downloads it as JSON, and the export itself is recorded.
+
+- **Audit log:** `…QUARANTINE_AUDIT__<iface>` records:
+  - every rules change: `RELOAD_RULES`, or `LOAD_RULES` at start-up or reconnect, with the old and new version and sha256, a summary of what changed, and the reason given on the page;
+  - refused rules;
+  - Restore trust, Release, reviews, exports and spikes.
+
+  The page requires a change reason to apply rules. It is sent as `requests/reload_rules.json`, bound to the file's sha256.
+- **Retention:** these rules settings replace the fixed caps:
+  - `quarantine_max_entries`
+  - `quarantine_raw_max_entries`
+  - `quarantine_raw_capture_bytes`
+  - `quarantine_max_age_days` (0 = keep until the count cap)
+  - `audit_max_entries`
+
+  `interface_details` shows the values in force under `firewall.quarantine.retention`.
+- **Export:** on the Quarantine tab, choose Export…. It downloads the newest entries matching the current filters (up to 10000):
+  - **JSON:** every field, bytes as hex.
+  - **pcap:** link type USER0 (147). In Wireshark, map DLT_USER User 0 to `ccsds`.
+
+  Each export is recorded in the audit log.
 
 ## 7. Key classes and objects
 
@@ -236,7 +318,12 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
 | `Match` | `lib/eaglegate_match.py` | The "does this rule apply?" conditions, with parsing and a readable `summary` |
 | `Verdict` | `lib/eaglegate_verdict.py` | Frozen decision record. The `stage` is RULE, DEFAULT, ERROR, STRUCTURAL, UNTRUSTED or LINK (an extension; `layer` says which part of it) |
 | `Extension`, `collect_extensions()` | `lib/eaglegate_extensions.py` | How another plugin's protocol in front of the firewall adds a rules section and link match keys (section 9) |
-| `parse_request()`, `NonceLog` | `lib/eaglegate_admin_requests.py` | Checks admin request files for RESTORE_TRUST and extension commands |
+| `parse_request()`, `NonceLog` | `lib/eaglegate_admin_requests.py` | Checks admin request files for RESTORE_TRUST, RELEASE and extension commands |
+| `check_entry()`, `deliver()` | `lib/eaglegate_release.py` | RELEASE: checks a quarantine entry and sends its packet on into COSMOS |
+| `SpikeDetector` | `lib/eaglegate_spike.py` | The spike warning behind `SPIKE_STATE` |
+| `rules_changes()`, `summary()` | `lib/eaglegate_rules_audit.py` | What changed between two rule sets, for the audit log |
+| `clean()` | `lib/eaglegate_safe_text.py` | Makes text safe to publish as operator telemetry |
+| `ReviewApp`, `AdminCheck` | `microservices/EAGLEGATE_QUARANTINE/` | The quarantine review service: admin check through COSMOS, listing, review states |
 | `parse_rules()`, `rules_schema()` | `lib/eaglegate_rules_parser.py` | JSON text to `Ruleset` with strict validation. `RULE_TYPES` is the registry of rule types. `rules_schema()` describes the format for the tool page |
 | `RulesStore` | `lib/eaglegate_rules_store.py` | Reads the pending, active and original rules; saves active and history. Never raises on writes |
 | `QuarantineWriter`, `StatusPublisher` | `lib/eaglegate_quarantine.py` | Valkey stream storage and the `FIREWALL_STATUS` packet |

@@ -1,0 +1,8 @@
+# Build context: the SDLS plugin folder. Only what the image needs goes in.
+*
+!sidecar/shim/
+!sidecar/eaglegate_sidecar/
+!sidecar/config/
+!sidecar/tests/
+!targets/EAGLEGATE_SDLS/lib/eaglegate_sdls_sidecar_protocol.py
+**/__pycache__

@@ -17,7 +17,7 @@ radio / ground station --frames--> [ SDLS frame protocol ]  ---packets + link va
   - It enforces everything about the link that can be checked without keys.
   - It labels frames of authenticated SAs as `auth_unverified`.
   - It can't read encrypted SAs.
-- **`sidecar`** (Phase 2): NASA CryptoLib verifies and decrypts frames in the `eaglegate-sdls-sidecar` container. The keys stay there. See "The CryptoLib sidecar" below, and [../eaglegate-sdls-sidecar/README.md](../eaglegate-sdls-sidecar/README.md).
+- **`sidecar`** (Phase 2): NASA CryptoLib verifies and decrypts frames in the `eaglegate-sdls-sidecar` container. The keys stay there. See "The CryptoLib sidecar" below, and [sidecar/README.md](sidecar/README.md).
 
 Design decisions and findings are in [../DECISIONS.md](../DECISIONS.md).
 
@@ -31,6 +31,7 @@ Design decisions and findings are in [../DECISIONS.md](../DECISIONS.md).
 | `targets/EAGLEGATE_SDLS/cmd_tlm/tlm.txt` | `LINK_STATUS` (this layer) and `FIREWALL_STATUS` (the firewall on this interface; a copy of the core's) |
 | `targets/EAGLEGATE_SDLS/screens/` | `link` (frames) and `firewall` (rejections) |
 | `tests/` | pytest suite. It needs the core plugin as a sibling folder, or `EAGLEGATE_CORE_DIR` |
+| `sidecar/` | The CryptoLib sidecar: a Docker image that runs next to COSMOS. **Not part of the gem**: the gemspec packages only `targets/` and similar folders, and `eagle.sh` leaves it out of the copy in `cosmos/` |
 
 | Module | Job |
 |---|---|
@@ -49,7 +50,7 @@ Design decisions and findings are in [../DECISIONS.md](../DECISIONS.md).
 ## Install
 
 1. Install `openc3-cosmos-eaglegate` (the core firewall).
-2. Build this plugin: `./eagle.sh build-sdls -v x.y.z` from the repository root (or `build-all` for both).
+2. Build this plugin: `./eagle.sh build-sdls -v x.y.z` from the repository root (or `build-core-sdls` for both plugins, `build-all` for both plugins and the sidecar image).
 3. Install the gem under Admin > Plugins and set the variables:
 
 | Variable | Default | Meaning |
@@ -176,7 +177,7 @@ The request must be recent and is used once. Operators who can send commands but
 
 ## The CryptoLib sidecar
 
-With `"crypto": {"backend": "sidecar"}`, each frame of an authenticating or encrypting SA goes to the `eaglegate-sdls-sidecar` container. Clear SAs are never sent. There, NASA CryptoLib 1.5.1 checks the MAC and/or decrypts the frame. Setup is in [../eaglegate-sdls-sidecar/README.md](../eaglegate-sdls-sidecar/README.md).
+With `"crypto": {"backend": "sidecar"}`, each frame of an authenticating or encrypting SA goes to the `eaglegate-sdls-sidecar` container. Clear SAs are never sent. There, NASA CryptoLib 1.5.1 checks the MAC and/or decrypts the frame. Setup is in [sidecar/README.md](sidecar/README.md).
 
 **The channel:**
 - HMAC-SHA256 on every request and every answer, with the channel key from the COSMOS secret `EAGLEGATE_SIDECAR_KEY`. A fake sidecar can't claim "verified", and nothing else can use the sidecar to decrypt frames.
@@ -206,6 +207,9 @@ With `"crypto": {"backend": "sidecar"}`, each frame of an authenticating or encr
   This shows in the Keys panel and in `REKEY_DUE`. It is a warning only: replacing keys is the mission's job.
 - **Counter reuse.** A verified frame that repeats an accepted counter under the same key, with different content, is rejected as `COUNTER REUSE` and logged as an error. The spacecraft reused an IV or sequence number, so the key must be replaced.
 - **Test keys.** Keys whose fingerprint matches one of CryptoLib's published test keys are flagged in red (`TEST_KEYS`). With `test_keys: deny`, frames under them are refused.
+- **Real keys and reloading** (decision D12). With the sidecar's `key_source: custom`, keys come from a Docker secret (format in `sidecar/README.md`).
+  - Problems are listed in the Crypto backend panel ("Key problems"): a missing or inactive key, a wrong length, or a test key.
+  - **Reload keys** on that panel (an admin request, audited) makes the sidecar re-read the secret without a restart.
 
 **Status:**
 - The Link status tab adds the **Crypto backend** and **Keys** panels.
@@ -227,7 +231,7 @@ From this folder, with the repository's dev venv: `../.venv/bin/python -m pytest
 ## Known limits
 
 - **Without the sidecar** (`backend: none`): MACs aren't verified (`auth_unverified`), encrypted SAs can't be read, and the anti-replay counter isn't authenticated.
-- **The sidecar uses CryptoLib's built-in test keys** (NOS3's). A key loader that reads a docker secret (`KEY_CUSTOM`) is planned.
+- **The sidecar defaults to CryptoLib's built-in test keys** (NOS3's). Use `key_source: custom` with a Docker secret for real keys (D12). KMC is not supported yet.
 - **The sidecar shares COSMOS's docker network.** Use an internal network to deny it outbound access.
 - **TM only:** no AOS or USLP. No SDLS-EP (key management) and no command (TC) side.
 - **Not tested inside a running COSMOS and NOS3 yet.** In particular, check the clear SA's IV field on real frames, and check the plugin install with `MAP_TLM_TARGET ... DISABLED`.

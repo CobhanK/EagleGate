@@ -18,6 +18,17 @@ Last updated: 2026-11-15
 
 The firewall itself uses only the Python standard library.
 
+The quarantine review microservice (`microservices/EAGLEGATE_QUARANTINE/`, added 2026-11-16) adds no packages either:
+- its HTTP server is `http.server`, and it asks COSMOS through `urllib.request`;
+- its only other imports are `json`, `hashlib`, `base64` and `re`;
+- it reaches Valkey through openc3's `Store`, which the operator container already provides.
+
+The page's Quarantine tab adds no npm packages. Its exports (JSON and pcap, added 2026-11-16) are written by the microservice with `json` and `struct`. The page downloads them with the browser's own `Blob` and `URL` APIs.
+
+The spike warning (`eaglegate_spike.py`, added 2026-11-16) uses only the standard library: its Poisson tail uses `math.lgamma` and `math.exp`, with no scipy.
+
+The `FIREWALLREJECTIONS` widget is built with the vite and `@vitejs/plugin-vue` already listed. It deliberately leaves out `vite-plugin-style-inject`, which COSMOS's widget generator would add, by using inline styles. It also doesn't import `@openc3/vue-common`. The built file imports only `vue`, which the page provides.
+
 ### Python: development only (tests and lint)
 
 | Package | Version | Why |
@@ -70,17 +81,17 @@ The lockfile resolves 301 packages in total, including transitive ones. Tests us
 
 The plugin's sidecar client (`eaglegate_sdls_sidecar_backend.py`) and wire protocol use only the standard library (`hmac`, `hashlib`, `secrets`, `socket`).
 
-## eaglegate-sdls-sidecar (CryptoLib container, Phase 2)
+## eaglegate-sdls-sidecar (CryptoLib container, Phase 2; sources in `openc3-cosmos-eaglegate-sdls/sidecar/`)
 
 | Component | Version | License | Why |
 |---|---|---|---|
-| NASA CryptoLib | v1.5.1, commit `5b98c8b2561b22822a9d4e26c959677ed93c815a` (checked at build time) | NOSA 1.3 | All SDLS cryptography. Built from source with `KEY_INTERNAL`, `SA_INTERNAL`, `MC_DISABLED` and `CRYPTO_LIBGCRYPT`, using upstream's flags |
+| NASA CryptoLib | v1.5.1, commit `5b98c8b2561b22822a9d4e26c959677ed93c815a` (checked at build time) | NOSA 1.3 | All SDLS cryptography. Built from source with `KEY_INTERNAL`, `KEY_CUSTOM` (our key ring, `shim/key_custom`), `SA_INTERNAL`, `MC_DISABLED` and `CRYPTO_LIBGCRYPT`, using upstream's flags |
 | libgcrypt | 1.10.1-3+deb12u1 (Debian bookworm) | LGPL-2.1+ | CryptoLib's crypto backend |
 | libgpg-error | 1.46-1 (Debian bookworm) | LGPL-2.1+ | Needed by libgcrypt |
 | Base image | `python:3.12-slim-bookworm@sha256:935c3c5b…03df` (Python 3.12.16, Debian 12.15) | PSF, Debian | Runtime. Pinned by digest |
 | Build stage only | build-essential, cmake, git (Debian bookworm) | various | Compile CryptoLib and the shim. Not in the runtime image |
 
-The sidecar's Python code uses only the standard library. Its tests use `unittest` in the image, and pytest in the dev venv.
+The sidecar's Python code uses only the standard library. Its tests use `unittest` in the image, and pytest in the dev venv. Real keys (`key_source: custom`, 2026-11-16) add no package: the key file is read with `json`, and the ring is CryptoLib's own custom key interface.
 
 **Version rule:** v1.5.2 (2026-11-04) is the latest release. It was skipped because it was less than two weeks old when pinned (DECISIONS.md D7). Re-check, then bump `CRYPTOLIB_TAG` and `CRYPTOLIB_COMMIT` in the Dockerfile.
 

@@ -51,6 +51,161 @@ Each entry covers:
 - **Decision:** extension plugins declare `panels` and `actions` as data. The core checks them when rules load and fails closed. The page draws them without knowing the extension.
 - **Why:** the core page needs no code change for each new extension.
 
+### C5. The quarantine review tool is admin-only, and the COSMOS server decides (2026-11-16)
+- **Decision:**
+  - A plugin microservice, `EAGLEGATE_QUARANTINE`, routed at `/eaglegate-quarantine`, reads the quarantine for the page's Quarantine tab and stores review states.
+  - On every request it forwards the caller's own COSMOS token to `GET /openc3-api/secrets`. That endpoint is admin-only, lists secret names (never values) and changes nothing. COSMOS answers 200 for admins, and 401 or 403 otherwise; the microservice passes 401 and 403 back. A yes is cached for 30 s per token (keyed by its sha256). Tokens are never logged.
+  - The user name in the audit entry comes from the Enterprise token, read only after COSMOS accepted it. In Core it is empty, and the name the page sends is kept as "requested_by".
+- **Instead of:**
+  - writing the entries to the config bucket: `download_file` needs only the `system` permission, so every operator could read them;
+  - `interface_details`: readable by everyone with `system`;
+  - COSMOS's admin Redis console (`POST /openc3-api/redis/exec`): admin-only, but it writes every result, packet bytes included, to the COSMOS log, which operators can read;
+  - an admin check in plugin code: Python `authorize()` is a no-op (R2).
+- **Why:** C1 says only admins may view the quarantine, and R2 says the COSMOS server, not plugin code, decides who is an admin.
+- **Known limits:**
+  - In COSMOS Core every logged-in user is an admin (R5).
+  - `ROUTE_PREFIX` must be unique across scopes, so install the core plugin in one scope.
+  - The counts and last reason in `FIREWALL_STATUS` and the Link status tab stay visible to operators, as before. They hold no packet bytes.
+
+### C6. Release sends the packet on without re-checking the rules (2026-11-16)
+- **Decision:**
+  - `RELEASE <request sha256>` is an admin request, like `RESTORE_TRUST`. The page uploads `requests/release.json` (only admins can), naming the entry id and the sha256 of the bytes the admin saw.
+  - The firewall then:
+    - releases only entries of the framed stream (RULE, DEFAULT, ERROR), and only whole, untruncated ones;
+    - checks the bytes against both the stored sha256 and the requested one;
+    - claims the entry with HSETNX in `QUARANTINE_RELEASED__<iface>` before delivering it, so it is released at most once. A failed delivery removes the claim.
+  - The packet is identified against the interface's telemetry targets and written to COSMOS's telemetry stream, tagged `extra.eaglegate_released = <entry id>`. A packet COSMOS doesn't recognise is refused.
+  - Every release, and every refusal, goes to the audit stream. `FIREWALL_STATUS` gains `RELEASED`.
+- **Instead of:** re-checking the packet against the current rules. Sequence and rate rules would always reject an old packet, so a re-check could only cover the content rules.
+- **Why:** the project owner's choice (2026-11-16). A release is an explicit admin override, made with a reason and audited. If the rule was wrong, it should be fixed on the Rules tab as well.
+
+### C7. Quarantined data is shown as untrusted text (2026-11-16)
+- **Decision:**
+  - The microservice sends packet bytes only as hex.
+  - Every text field is made printable, because some of it comes from the packet (text-rule details, link values):
+    - control, format and invisible characters (C0/C1 controls, bidi overrides, zero-width, line separators) become visible escapes such as `\x1b` or `\u202e`;
+    - bad UTF-8 becomes U+FFFD;
+    - long text is cut.
+  - Responses are JSON with `nosniff`, `no-store` and `default-src 'none'`. Errors never include internal details.
+  - The page escapes the text again, renders it only with Vue's `{{ }}` (never `v-html`), and shows only printable ASCII as characters in the hex dump.
+  - Filters, notes and ids are checked on both sides, with full-string matches. (A regex `$` also matches before a trailing newline. The same fix was made to the admin-request nonce check.)
+- **Why:** a quarantined packet is hostile by assumption. It must not be able to inject markup, terminal escapes or misleading text (Trojan Source-style bidi) into the reviewer's screen.
+
+### C8. Review states (2026-11-16)
+- **Decision:**
+  - Review states are `new` (cleared), `reviewed`, `false_positive`, `threat` and `dismissed`, with a note of up to 256 characters.
+  - They are stored in the hash `QUARANTINE_REVIEW__<iface>`, keyed `{stream}:{entry id}`. The raw and framed streams can produce the same id, which is why the stream is part of the key.
+  - `released` is shown from the RELEASED hash and set only by the firewall.
+  - Each change writes one audit entry.
+  - Reviews of entries the capped streams have dropped are pruned once the hash passes 25,000 fields.
+  - The list shows the most recent N entries, where N (1–1000, default 50) is set and remembered per browser, and filters by stream, stage, rule, APID, review state and text. One request scans at most 10,000 entries (the framed stream's cap); "Load older" continues from there.
+- **Why:** the admin needs to triage rejections and leave a record of the call, without writing to the streams themselves.
+
+### C9. The last 10 rejections are operator-visible telemetry (2026-11-16)
+- **Decision:**
+  - A new telemetry packet, `FIREWALL_RECENT`, carries the 10 most recent rejections: time, stage, rule, APID, TLM/CMD, the COSMOS packet name when recognised, sequence count, length, layer and link values, a reason cut to about 160 characters, and the quarantine entry id. It never carries packet bytes.
+  - Its text is cleaned by the C7 rules before it is published.
+  - Anyone who can view the target's telemetry can see it.
+- **Why:** the project owner accepted it (2026-11-16). The Telemetry Viewer is an operator tool. This widens C1 and C5 only from the last reason to the last 10. Bytes, review states and release stay admin-only.
+
+### C10. The recent-rejections widget lives in the core plugin (2026-11-16)
+- **Decision:**
+  - The `FIREWALLREJECTIONS` Telemetry Viewer widget is built in `openc3-cosmos-eaglegate` with a second vite config, next to the tool page.
+  - It adds no new npm packages: it uses inline styles and Vuetify classes, without `vite-plugin-style-inject`.
+- **Instead of:** a separate widget plugin.
+- **Why:** the project owner's choice, to keep the layout simple. COSMOS's custom-widget guide warns that a plugin holding a tool and a widget "may run into build issues". If that happens, record the fix here.
+- **As built:**
+  - A second vite config, `vite-FirewallrejectionsWidget.config.js` (`publicDir: false`), builds one 7 KB UMD file. Vue is its only import.
+  - The widget doesn't use the `@openc3/vue-common` Widget mixin. It declares the props the screen passes (`parameters`, `screenValues` and so on) and emits `addItem`/`deleteItem` itself. Importing the mixin would have bundled a large part of vue-common.
+  - `pnpm build` runs both builds; no build problems so far.
+  - A row links to `/tools/eaglegate?tab=quarantine&interface=&stream=&entry=`. The page checks each value and opens that entry, and the review service still decides who may see it.
+
+### C11. Spike warnings use COSMOS's own alert system (2026-11-16)
+- **Decision:**
+  - The firewall judges rejections in windows (`eaglegate_spike.py`). It publishes the result as `FIREWALL_STATUS SPIKE_STATE`, whose `STATE` colours (NORMAL GREEN, ELEVATED YELLOW, SPIKE RED) put it in COSMOS's limits system. COSMOS then:
+    - turns YELLOW into a notification in every tool's bell menu, and RED into an alert toast that stays until someone acknowledges it (the decom microservice's limits callback);
+    - shows the state in the Limits Monitor and on screens, and records limits events;
+    - can run a `LIMITS_RESPONSE`, or, in Enterprise, an Autonomic trigger.
+  - Alongside it, `REJECT_RATE`, `REJECT_BASELINE`, `SPIKE_REASON`, `SPIKE_TOP_RULE` and `SPIKE_SINCE`.
+  - When the state changes, the firewall logs one `notification` carrying the reason, and writes a `SPIKE` entry to the audit stream. It never logs its own `alert`: the RED state already raises one, and two toasts per spike would teach people to dismiss them.
+  - An example `LIMITS_RESPONSE` (`eaglegate_spike_limits_response.py`) is shipped, commented out under `SPIKE_STATE`, for anyone who wants a spike to act.
+  - **The detector** (standard methods only, Python standard library):
+    - an EWMA baseline (α = 0.05, floor 0.5 per window);
+    - a Poisson tail test, because normal counts are too small for a z-score;
+    - an absolute ceiling;
+    - a rejected-fraction test once a window has at least 10 packets;
+    - a security-failure count (authenticity and sequence rules, and the SDLS `sdls` layer);
+    - a tabular CUSUM (k = 0.5, h = 5) for slow rises. It adds up only windows the other tests call normal, and restarts when they fire.
+  - **Protections:**
+    - windows without traffic change nothing (gaps between passes);
+    - the baseline doesn't learn while the state is raised, and the ceiling always applies (against baseline poisoning);
+    - hysteresis: the state rises at once and falls after `spike_clear_windows` calm windows;
+    - new rules restart the baseline at the strict floor, and the reason mentions the change for 30 windows.
+  - Every threshold is an admin setting in the rules file's `settings` (`spike_*`), with a default, on the Rules tab (principle P1).
+  - A daemon ticker thread closes windows and publishes once a second, so a spike can clear while the link is silent. It shares a lock with the read thread for publishing.
+- **Instead of:**
+  - a separate alerting service or email sender: new code and dependencies, which P2 says to avoid;
+  - logging alerts directly: no Limits Monitor, Autonomic or `LIMITS_RESPONSE` hooks.
+- **Why:** the project owner asked for the warning to fit COSMOS's existing alert frameworks (2026-11-16).
+- **Known limits:**
+  - Toasts need a COSMOS page to be open. Unattended reactions need `LIMITS_RESPONSE` or Enterprise Autonomic.
+  - Operators with `system_set` can disable limits on the item. The notification and the audit entry are still written.
+  - Bytes discarded from an already untrusted connection don't count as rejections; `CONNECTION_UNTRUSTED` is RED on its own already.
+  - If rejections stay high for good (for example a rule that is too strict), the state stays raised until the cause is fixed or the settings are changed. This is by design.
+
+### C12. Monitor mode, for a whole rule set or one rule (2026-11-16)
+- **Decision:**
+  - The setting `enforcement` is `enforce` (default) or `monitor`. In monitor, every packet the rules would deny is delivered.
+  - A DENY rule may have `"monitor": true`. When it fires, its denial is only recorded, and the rules below it decide the packet.
+  - Every would-be denial is:
+    - quarantined in the framed stream with `monitor: true`, never releasable (the packet was delivered);
+    - logged at INFO, and reasoned "WOULD DENY (monitor) by …";
+    - counted as `MONITORED`, and counted by the spike detector.
+  - `FIREWALL_STATUS ENFORCEMENT` is ENFORCE (GREEN) or MONITOR (YELLOW), so switching a whole set to monitor raises a COSMOS notification. `MONITOR_RULES` counts monitored rules. The page shows a banner, and the apply dialog warns.
+  - Monitor shows exactly what enforce would do:
+    - a would-be denial never teaches a stateful rule (sequence, rate), just as an enforced denial doesn't;
+    - in monitor mode, a first packet that would be denied doesn't mark the connection untrusted.
+  - **Unchanged:** the hardcoded structural check, the built-in deny-all set (used when no rules load), and an extension's own checks (SDLS has its own monitor mode).
+- **Why:** without it, every new rule set goes straight to blocking, and one wrong rule drops live telemetry. This is the standard way to roll out firewall rules safely.
+
+### C13. Every rules change is in the audit stream (2026-11-16)
+- **Decision:**
+  - The firewall writes an audit entry when:
+    - `RELOAD_RULES` applies, re-applies or refuses a rule set;
+    - a different rule set is loaded on connect (`LOAD_RULES`, including the first load at start-up);
+    - a load fails. That entry is written once per distinct error, not on every reconnect attempt.
+  - **Each entry holds:**
+    - the old and new version and sha256, the source, and the enforcement mode;
+    - whether the set is signed, and any persist error;
+    - a summary of what changed (`eaglegate_rules_audit.py`): rules added, removed, changed, disabled, enabled or newly monitored; reordering; the default action; settings; extension sections.
+  - **The change reason:** the EagleGate page requires one when applying. It sends `requests/reload_rules.json`, an admin request (C5 pattern) bound to the pending file's sha256, as a third `RELOAD_RULES` argument. A request for a different file, or one that is used, expired or tampered with, refuses the apply. The apply procedure sends no request and is audited without a reason.
+- **Why:** a firewall's audit trail must cover changes to its policy, not only the actions around it. This narrows R5.4: the reason and the "requested by" name the page reports are recorded, and COSMOS's own log still has the authenticated user of the upload.
+
+### C14. Retention is an admin setting; admins can export (2026-11-16)
+- **Decision:**
+  - **Retention settings in the rules file** (defaults are the old constants):
+    - `quarantine_max_entries` (10000; 100–100000)
+    - `quarantine_raw_max_entries` (1000)
+    - `quarantine_raw_capture_bytes` (4096; 256–65536)
+    - `quarantine_max_age_days` (0 = no age limit; trimmed with `XTRIM MINID ~` at most once a minute)
+    - `audit_max_entries` (10000; 1000–1000000; the audit log is never trimmed by age)
+  - The review microservice no longer caps the audit stream itself; only the firewall, which knows the setting, trims it.
+  - **Export:** `GET /eaglegate-quarantine/export` (admins only, like C5) downloads up to 10000 entries that match the current filters, as:
+    - JSON (every field, bytes as hex, metadata naming the exporter, filters and audit id, and `complete`), or
+    - classic pcap (link type USER0 = 147; Wireshark can map it to its `ccsds` dissector). Truncated raw entries keep their original length.
+  - Every export writes an `EXPORT` audit entry: who, format, count and filters.
+- **Why:** principle P1 (a default plus an admin setting instead of constants), and incident response needs the evidence outside COSMOS, with a record of who took it.
+
+### C15. An admin-only audit log viewer (2026-11-16)
+- **Decision:**
+  - The review microservice serves `GET /eaglegate-quarantine/audit`: the audit stream, newest first, filtered by action, outcome and text, with paging. It also serves `/audit/export`: up to 10000 entries as JSON, itself recorded as an `EXPORT` entry.
+  - **Every entry:**
+    - its common fields (time, action, ok, detail, reason, requested by, the authenticated user), cleaned (C7);
+    - its other fields, with JSON ones such as rule `changes` parsed.
+  - The EagleGate page's **Audit log** tab shows it: action chips, who, reason, an expandable view of every field, and Export.
+  - Admins only, decided by the COSMOS server (C5).
+- **Why:** after C12–C14 the audit stream holds rule changes, releases, reviews, exports, spikes and key reloads. The page showed only the last 20 admin actions, kept in memory and lost on restart.
+
 ## Rules editor
 
 ### R1. Supports Core and Enterprise (2026-10-17)
@@ -129,7 +284,7 @@ Each entry covers:
 - **Decision:**
   - The built-in key ring holds CryptoLib's published test keys, the same ones NOS3 flight uses.
   - It is reported, and flagged, as TEST KEYS.
-  - Planned next: a `KEY_CUSTOM` loader that reads a docker secret; KMC later.
+  - Planned next: a `KEY_CUSTOM` loader that reads a docker secret; KMC later. Built: see D12.
 - **Why:** the NOS3 lab works today, and nobody can mistake the setup for a production one.
 
 ### D3. The sidecar channel is authenticated with HMAC-SHA256
@@ -186,7 +341,47 @@ TC and SDLS-EP are Phase 3.
   - It holds the keys and the C code.
   - It is under CryptoLib's NOSA licence.
   - It has its own toolchain and SBOM entries.
-- **Note:** the Dockerfile copies the wire-protocol module from the SDLS plugin, so the two ends share one definition. Moving it inside the plugin folder would also work, because the gem only packages `targets/`, `lib/` and so on. That choice is open to revisit.
+- **Note:** the Dockerfile copies the wire-protocol module from the SDLS plugin, so the two ends share one definition. Moving it inside the plugin folder would also work, because the gem only packages `targets/`, `lib/` and so on. Superseded by D11.
+
+### D11. The sidecar moves into the SDLS plugin folder (2026-11-15; supersedes D10)
+- **Decision:** the sources move to `openc3-cosmos-eaglegate-sdls/sidecar/`, and the Python package is renamed `eaglegate_sidecar` so the path doesn't read `sidecar/sidecar`.
+- **Why:** the project owner wants an understandable layout. Only the SDLS plugin talks to the sidecar, and COSMOS never touches it directly.
+- **What stays the same:**
+  - It is still a separate Docker image, still not part of the gem. The gemspec packages only `targets/` and similar folders, and `eagle.sh` removes `sidecar/` from the plugin's copy in `cosmos/`.
+  - Isolation, licensing and toolchain (D10) are unchanged.
+  - The container and host name are still `eaglegate-sdls-sidecar`.
+- **Build:** the image's build context is the plugin folder. `sidecar/Dockerfile.dockerignore` lets in only what the image needs, and never `secrets/`.
+
+### D12. Real keys through CryptoLib's custom key interface (2026-11-16)
+The project owner's answers (2026-11-16): a Docker secret JSON file, key states honoured, start and report, hot reload.
+- **Decision:**
+  - **Sidecar key source:** `key_source` `internal` (CryptoLib's test ring, the default) or `custom`.
+  - **What `custom` is:** CryptoLib's own extension point, `-DKEY_CUSTOM=ON` with `KEY_CUSTOM_PATH=shim/key_custom`, chosen at run time with `KEY_TYPE_CUSTOM`. It is a key ring only: the same `crypto_key_t` array CryptoLib's internal interface uses, but starting empty. CryptoLib does every cryptographic operation, and itself refuses keys that aren't `KEY_ACTIVE`.
+  - **Key source:** one Docker secret, `{"keys": [{"id", "hex", "state"}]}`, mounted as a read-only folder. A file bind mount would keep a replaced file's old content and defeat a reload.
+  - **States:** preactive, active, deactivated, destroyed and corrupted are passed to CryptoLib as they are, so a next key can be staged.
+  - **Start and report:** the sidecar loads every valid entry and reports problems in its log, `info` and the Keys and Crypto backend panels, never with key bytes:
+    - skipped entries;
+    - an SA's key missing or not active;
+    - a length other than CryptoLib's own `Crypto_Get_ECS/ACS_Algo_Keylen` for the SA's suite;
+    - a CryptoLib test key (D6 fingerprints).
+
+    An unreadable file starts it with no keys, so frames fail and EagleGate follows `on_unavailable`.
+  - **Hot reload:** the wire protocol gains `reload_keys`, authenticated like every request (D3). EagleGate sends it only for the admin action `RELOAD_KEYS`: an admin request on the Crypto backend panel, written to the audit log. The plugin sends it on a session of its own, so the read thread's connection is untouched, then re-reads `info`.
+    - The sidecar replaces the whole ring under the engine lock: never a half-loaded ring.
+    - A file that cannot be read at all leaves the current keys; bad entries are skipped and reported.
+    - New fingerprints mean new key epochs, and so new anti-replay baselines.
+  - **Wiping:** key bytearrays in Python are wiped after loading, and CryptoLib's ring with `explicit_bzero` on reload and shutdown. Python's JSON string can't be wiped; the secret file is the long-lived copy.
+- **Instead of:**
+  - one file per key;
+  - all keys always active;
+  - refusing to start on bad keys;
+  - rotation by restart only.
+
+  These were the alternatives offered for each choice.
+- **Why:** real SDLS keys are needed for v1, kept within principle P3: CryptoLib's own interface, no new cryptography.
+- **Known limits:**
+  - Anyone holding the sidecar channel key can trigger a reload. That key is a COSMOS secret, and the reload only re-reads the secret file.
+  - Keys sit in plaintext inside the Docker secret, protected by the mount and file permissions. KMC, or an HSM, is the upgrade path.
 
 ### Key-management items adopted (2026-11-15)
 

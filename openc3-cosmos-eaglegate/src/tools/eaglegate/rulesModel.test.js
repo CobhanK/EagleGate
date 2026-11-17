@@ -335,3 +335,69 @@ test('compact diff keeps changes with context and folds unchanged runs', () => {
   ])
   assert.deepEqual(compactDiff([]), [])
 })
+
+test('spike settings are validated like the firewall does', () => {
+  const ok = { version: 1, default_action: 'DENY', rules: [] }
+  assert.deepEqual(
+    validate(
+      {
+        ...ok,
+        settings: { spike_window_seconds: 30, spike_max_fraction: 0.3 },
+      },
+      schema,
+    ),
+    [],
+  )
+  assert.ok(
+    validate({ ...ok, settings: { spike_window_seconds: 1 } }, schema).length,
+  )
+  assert.ok(
+    validate({ ...ok, settings: { spike_max_fraction: 0 } }, schema).length,
+  )
+  const d = { ...ok }
+  setSetting(d, schema, 'spike_ceiling', 50)
+  assert.equal(settingValue(d, schema, 'spike_ceiling'), 50)
+  setSetting(d, schema, 'spike_ceiling', undefined) // the field was emptied
+  assert.equal(d.settings, undefined)
+  assert.equal(settingValue(d, schema, 'spike_ceiling'), 100)
+})
+
+test('monitor is a DENY-only true/false flag, like the firewall checks', () => {
+  const rule = (extra) => ({
+    version: 1,
+    default_action: 'DENY',
+    rules: [{ id: 'r', action: 'DENY', match: {}, ...extra }],
+  })
+  assert.deepEqual(validate(rule({ monitor: true }), schema), [])
+  assert.match(
+    validate(rule({ monitor: 'yes' }), schema).join(),
+    /monitor must be true or false/,
+  )
+  assert.match(
+    validate(rule({ action: 'ALLOW', monitor: true }), schema).join(),
+    /monitor only applies to DENY rules/,
+  )
+  assert.deepEqual(
+    validate(
+      {
+        version: 1,
+        default_action: 'DENY',
+        rules: [],
+        settings: { enforcement: 'monitor' },
+      },
+      schema,
+    ),
+    [],
+  )
+  assert.ok(
+    validate(
+      {
+        version: 1,
+        default_action: 'DENY',
+        rules: [],
+        settings: { enforcement: 'off' },
+      },
+      schema,
+    ).length,
+  )
+})

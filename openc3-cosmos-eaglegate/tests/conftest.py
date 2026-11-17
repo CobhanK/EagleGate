@@ -29,26 +29,40 @@ class FakeValkey:
     """Records what the quarantine writer and status publisher would send to COSMOS."""
 
     def __init__(self):
-        self.entries = []   # (stream, fields, maxlen)
+        self.entries = []   # (stream, fields, maxlen) of the quarantine streams
+        self.audits = []    # (stream, fields, maxlen) of the audit stream
         self.status = []    # item_hash of each FIREWALL_STATUS packet
+        self.recent = []    # item_hash of each FIREWALL_RECENT packet
         self.fail = False   # make every write raise, like a Valkey outage
 
     def write(self, writer, stream, fields, maxlen):
         if self.fail:
             raise ConnectionError("valkey down")
-        self.entries.append((stream, fields, maxlen))
-        return f"{len(self.entries)}-0".encode()
+        target = self.audits if "_AUDIT__" in stream else self.entries
+        target.append((stream, fields, maxlen))
+        return f"{len(target)}-0".encode()
 
     def inject(self, publisher, message_json):
         if self.fail:
             raise ConnectionError("valkey down")
         message = json.loads(message_json)
-        assert (message["target_name"], message["packet_name"]) == ("EAGLEGATE", "FIREWALL_STATUS")
-        self.status.append(message["item_hash"])
+        assert message["target_name"] == "EAGLEGATE"
+        assert message["packet_name"] in ("FIREWALL_STATUS", "FIREWALL_RECENT")
+        (self.status if message["packet_name"] == "FIREWALL_STATUS" else self.recent).append(message["item_hash"])
 
     def stream(self, suffix):
         """Field dicts written to the stream whose name ends with suffix."""
-        return [fields for stream, fields, _ in self.entries if stream.endswith(suffix)]
+        return [fields for stream, fields, _ in self.entries + self.audits if stream.endswith(suffix)]
+
+    def audit(self, action):
+        """Audit entries of one action (every interface start also audits LOAD_RULES)."""
+        return [fields for _, fields, _ in self.audits if fields.get("action") == action]
+
+
+@pytest.fixture(autouse=True)
+def no_ticker(monkeypatch):
+    """No background thread in tests: they call tick_spike() with their own clock."""
+    monkeypatch.setattr(eaglegate_firewall_protocol.EaglegateFirewallProtocol, "TICKER_ENABLED", False)
 
 
 @pytest.fixture(autouse=True)
@@ -75,16 +89,16 @@ def log(monkeypatch):
 
     class FakeLogger:
         @staticmethod
-        def warn(msg):
-            messages.append(("WARN", msg))
+        def warn(msg, **kwargs):
+            messages.append(("WARN", msg, kwargs.get("type")) if kwargs else ("WARN", msg))
 
         @staticmethod
-        def info(msg):
+        def info(msg, **kwargs):
             messages.append(("INFO", msg))
 
         @staticmethod
-        def error(msg):
-            messages.append(("ERROR", msg))
+        def error(msg, **kwargs):
+            messages.append(("ERROR", msg, kwargs.get("type")) if kwargs else ("ERROR", msg))
 
     monkeypatch.setattr(eaglegate_firewall_protocol, "Logger", FakeLogger)
     return messages

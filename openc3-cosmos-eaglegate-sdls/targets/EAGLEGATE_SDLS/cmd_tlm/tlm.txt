@@ -33,6 +33,29 @@ TELEMETRY EAGLEGATE_SDLS FIREWALL_STATUS BIG_ENDIAN "Firewall rejection counts a
   APPEND_ITEM    PACKETS              32 UINT    "Packets judged by the rules (allowed + rejected), since the interface started"
   APPEND_ITEM    ALLOWED              32 UINT    "Packets allowed through to COSMOS"
   APPEND_ITEM    SEQ_GAPS             32 UINT    "Packets whose CCSDS sequence count did not follow the previous one of their APID"
+  # Quarantine review tool (eaglegate_release.py)
+  APPEND_ITEM    RELEASED             32 UINT    "Quarantined packets an admin released into COSMOS (rules not re-checked)"
+  # Spike warning (eaglegate_spike.py). SPIKE_STATE's colours put it in COSMOS's limits
+  # system: YELLOW = a notification, RED = an alert that must be acknowledged
+  APPEND_ITEM    SPIKE_STATE           8 UINT    "Rejection rate compared with normal for this link"
+    STATE NORMAL 0 GREEN
+    STATE ELEVATED 1 YELLOW
+    STATE SPIKE 2 RED
+    # Optional: also act on a spike (example code, off by default):
+    # LIMITS_RESPONSE eaglegate_spike_limits_response.py
+  APPEND_ITEM    REJECT_RATE          32 FLOAT   "Rejections per minute in the last spike window"
+    UNITS "per minute" "/min"
+  APPEND_ITEM    REJECT_BASELINE      32 FLOAT   "Rejections per minute that are normal for this link (learned)"
+    UNITS "per minute" "/min"
+  APPEND_ITEM    SPIKE_REASON       2048 STRING  "Why SPIKE_STATE is what it is"
+  APPEND_ITEM    SPIKE_TOP_RULE      512 STRING  "The rule (or stage) behind most rejections of the raised state"
+  APPEND_ITEM    SPIKE_SINCE         256 STRING  "UTC time the current raised state began (empty when NORMAL)"
+  # Monitor mode (settings.enforcement, a rule's "monitor"): would-be denials are delivered
+  APPEND_ITEM    MONITORED            32 UINT    "Delivered packets the rules would have denied (monitor mode or monitored rules)"
+  APPEND_ITEM    ENFORCEMENT           8 UINT    "ENFORCE: denials are withheld. MONITOR: the whole rule set only records them"
+    STATE ENFORCE 0 GREEN
+    STATE MONITOR 1 YELLOW
+  APPEND_ITEM    MONITOR_RULES        16 UINT    "Rules that only record their denials (rule setting monitor = true)"
 
 # Published by the SDLS frame protocol (eaglegate_sdls_status.py), never received.
 # Its ID is CCSDS version 6, which the firewall's structural check rejects on
@@ -86,3 +109,13 @@ TELEMETRY EAGLEGATE_SDLS LINK_STATUS BIG_ENDIAN "SDLS frame counts and the last 
   APPEND_ITEM    TEST_KEYS           16 UINT    "SAs protected by one of CryptoLib's published TEST KEYS (never in operations)"
     LIMITS DEFAULT 1 ENABLED -2 -1 0.1 0.5
   APPEND_ITEM    NEW_KEYS            32 UINT    "Times an SA's key changed (a new anti-replay baseline started)"
+
+# The 10 most recent rejections, for the FIREWALLREJECTIONS Telemetry Viewer
+# widget (decision C9): metadata and reasons only, never packet bytes; text is
+# cleaned before publishing. Published by the firewall, never received: its ID
+# is CCSDS version 5, which the structural check rejects on every received packet.
+TELEMETRY EAGLEGATE_SDLS FIREWALL_RECENT BIG_ENDIAN "The most recent firewall rejections"
+  APPEND_ID_ITEM CCSDS_VERSION         3 UINT 5  "Always 5, so received packets can never match"
+  APPEND_ITEM    SPARE                 5 UINT    "Unused"
+  APPEND_ITEM    RECENT_COUNT          8 UINT    "Rejections in RECENT_JSON (at most 10)"
+  APPEND_ITEM    RECENT_JSON           0 STRING  "JSON list, newest first: time, interface, stage, rule_id, rule_type, layer, apid, packet_type, packet, seq_count, length, link, reason, entry_id"

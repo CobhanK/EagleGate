@@ -168,7 +168,8 @@ def test_valkey_outage_never_changes_decisions(valkey, monkeypatch):
     assert apids(read_all(iface)) == [2, 3]
     assert proto.rejected == 2
     summary = proto.quarantine.summary()
-    assert (summary["written"], summary["errors"], summary["skipped"]) == (0, 1, 1)  # paused after one
+    # The start-up LOAD_RULES audit write fails and pauses writes: both rejections are skipped
+    assert (summary["written"], summary["errors"], summary["skipped"]) == (0, 1, 2)
     assert "valkey down" in summary["last_error"]
     assert proto.last_rejection["entry_id"] is None
 
@@ -356,8 +357,15 @@ def test_status_goes_through_cosmos_inject_tlm_code(monkeypatch, packets):
     iface, proto, _ = build([hk_status() + ccsds(2, packet_type=1)])
     read_all(iface)
     proto._publish_status_if_due(force=True)
-    assert proto.status.errors == 0 and written == ["DEFAULT", "DEFAULT"]  # connect + forced
+    # FIREWALL_STATUS and FIREWALL_RECENT, on connect and forced
+    assert proto.status.errors == 0 and written == ["DEFAULT"] * 4
     assert packet.read("REJECTED") == 1 and packet.read("DENIED_RULE") == 1
+    assert packet.read("SPIKE_STATE") == "NORMAL" and packet.read("REJECT_RATE") == 0.0
+    recent = config.telemetry["EAGLEGATE"]["FIREWALL_RECENT"]
+    assert recent.read("RECENT_COUNT") == 1
+    [row] = json.loads(recent.read("RECENT_JSON"))
+    assert (row["rule_id"], row["packet_type"], row["apid"]) == ("deny-commands-on-tlm-link", "CMD", "0x002")
+    assert telemetry.identify(bytes(recent.buffer), ["EAGLEGATE"]).packet_name == "FIREWALL_RECENT"
     assert packet.read("CONNECTION_UNTRUSTED") == "FALSE" and packet.read("RULES_VERSION") == 1
     assert packet.read("LAST_RULE_ID") == "deny-commands-on-tlm-link"
     assert packet.read("LAST_REASON").startswith("DENY by rule 'deny-commands-on-tlm-link'")

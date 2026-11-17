@@ -35,7 +35,8 @@ class Rule:
     action: str
     match: Match
     description: str = ""      # the rule's "description" from the rules file
-    hits: int = 0              # how many packets this rule has decided
+    monitor: bool = False      # "monitor": true: when it fires, only record a would-be denial
+    hits: int = 0              # how many packets this rule has decided (or, monitored, fired on)
 
     @classmethod
     def parse_params(cls, params, where):

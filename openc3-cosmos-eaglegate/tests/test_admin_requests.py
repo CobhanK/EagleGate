@@ -43,6 +43,7 @@ def test_sha256_is_compared_case_insensitively():
     ({"reason": "abc\u202edef"}, "control or invisible"),
     ({"nonce": "short"}, "nonce must be"),
     ({"nonce": "has spaces in it ok"}, "nonce must be"),
+    ({"nonce": "0123456789abcdef0123\n"}, "nonce must be"),  # "$" would let the newline through
     ({"requested_by": 7}, "requested_by"),
     ({"requested_by": "x" * 65}, "requested_by"),
     ({"params": []}, "params must be an object"),
@@ -130,7 +131,7 @@ def test_restore_trust_resumes_the_same_connection(valkey, log):
     assert not fw.connection_untrusted  # a later rejection affects only its own packet
 
     assert "restore_trust" not in store.requests  # consumed
-    [audit] = valkey.stream("_AUDIT__EAGLEGATE_INT")
+    [audit] = valkey.audit("RESTORE_TRUST")
     assert (audit["action"], audit["ok"], audit["reason"]) == ("RESTORE_TRUST", "true",
                                                               "first packet was a stale buffer")
     assert audit["request_sha256"] == sha and "its first packet was rejected" in audit["previous_cause"]
@@ -146,7 +147,7 @@ def test_restore_trust_without_an_uploaded_request_is_refused(valkey):
     assert fw.connection_untrusted
     action = fw.admin_actions[-1]
     assert action["ok"] is False and "no restore_trust request" in action["detail"]
-    [audit] = valkey.stream("_AUDIT__EAGLEGATE_INT")
+    [audit] = valkey.audit("RESTORE_TRUST")
     assert audit["ok"] == "false"
 
 

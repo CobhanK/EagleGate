@@ -1,7 +1,7 @@
 """The messages between EagleGate and the CryptoLib sidecar (wire protocol v1).
 
 ONE definition for both ends: the sidecar image copies this file
-(eaglegate-sdls-sidecar/Dockerfile), the SidecarCrypto backend imports it.
+(sidecar/Dockerfile in this plugin), the SidecarCrypto backend imports it.
 Standard library only.
 
 Transport: TCP. Each message is a 4-byte big-endian length, then that many
@@ -31,6 +31,15 @@ No new cryptography: one standard MAC over a canonical form of each message.
   <- {"op": "tm_process", "id": 2, "ok": true, "status": "verified", "spi": 7,
       "frame_sha256": ..., "data_field": <base64>, "cryptolib_status": 0, "mac": ...}
 
+  -> {"op": "reload_keys", "id": 3, "mac": ...}
+  <- {"op": "reload_keys", "id": 3, "ok": true, "loaded": 4, "problems": ["SPI 7: ..."],
+      "detail": "...", "mac": ...}
+     Re-reads the sidecar's key secret into CryptoLib's custom key ring
+     (key_source "custom"; decision D12). Authenticated like every request;
+     EagleGate sends it only for an admin request (RELOAD_KEYS). "ok": false
+     when the keys were NOT changed (internal key source, unreadable file).
+     Problems name key ids and SPIs, never key bytes.
+
   -> {"op": "health"}           (no session, no MAC: says only that it is up)
   <- {"op": "health", "ok": true}
 
@@ -47,7 +56,8 @@ import struct
 
 VERSION = 1
 MAX_MESSAGE = 256 * 1024  # bytes of JSON (an info answer lists every SA)
-OPS = ("health", "hello", "info", "tm_process")
+OPS = ("health", "hello", "info", "tm_process", "reload_keys")
+MAX_PROBLEMS = 50
 # tm_process statuses
 VERIFIED = "verified"    # authentication-only SA: CryptoLib checked the MAC
 DECRYPTED = "decrypted"  # encrypting SA: CryptoLib decrypted (and, for authenc, checked the tag)
@@ -184,6 +194,27 @@ def info_request(request_id):
 
 def tm_process_request(request_id, frame):
     return {"op": "tm_process", "id": request_id, "frame": b64(frame)}
+
+
+def reload_keys_request(request_id):
+    return {"op": "reload_keys", "id": request_id}
+
+
+def reload_keys_response(request_id, ok, loaded, problems, detail):
+    return {"op": "reload_keys", "id": request_id, "ok": bool(ok), "loaded": int(loaded),
+            "problems": [str(p)[:MAX_DETAIL] for p in problems][:MAX_PROBLEMS], "detail": str(detail)[:MAX_DETAIL]}
+
+
+def parse_reload_keys_response(message):
+    """-> (ok, loaded, problems, detail). Call check_response first."""
+    ok = message.get("ok")
+    loaded = message.get("loaded")
+    problems = message.get("problems")
+    if not isinstance(ok, bool) or not isinstance(loaded, int) or isinstance(loaded, bool):
+        raise SidecarProtocolError("malformed reload_keys answer")
+    if not isinstance(problems, list) or not all(isinstance(p, str) for p in problems):
+        raise SidecarProtocolError("reload_keys problems must be a list of text")
+    return ok, loaded, [p[:MAX_DETAIL] for p in problems[:MAX_PROBLEMS]], _detail(message)
 
 
 def frame_sha256(frame):

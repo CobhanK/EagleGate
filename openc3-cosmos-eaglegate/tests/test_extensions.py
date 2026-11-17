@@ -14,6 +14,7 @@ from eaglegate_firewall_protocol import EaglegateFirewallProtocol
 from eaglegate_match import Match
 from eaglegate_rules_error import RulesError
 from eaglegate_rules_parser import TOP_LEVEL_KEYS, parse_rules, rules_schema
+from eaglegate_ruleset import DEFAULT_SETTINGS
 from eaglegate_verdict import LINK, Verdict
 from eaglegate_test_support import FakeRulesStore, ScriptedInterface
 from openc3.interfaces.protocols.protocol import Protocol
@@ -257,15 +258,23 @@ def test_schema_describes_link_and_settings():
 # ---- settings ----
 
 def test_settings_default_and_parse():
-    assert parse_rules(rules_json([])).settings == {"untrust_on_first_packet_reject": True}
-    parsed = parse_rules(rules_json([], settings={"untrust_on_first_packet_reject": False}))
-    assert parsed.settings == {"untrust_on_first_packet_reject": False}
+    assert parse_rules(rules_json([])).settings == DEFAULT_SETTINGS
+    parsed = parse_rules(rules_json([], settings={"untrust_on_first_packet_reject": False,
+                                                  "spike_window_seconds": "0x1E", "spike_max_fraction": 0.25}))
+    assert parsed.settings == {**DEFAULT_SETTINGS, "untrust_on_first_packet_reject": False,
+                               "spike_window_seconds": 30, "spike_max_fraction": 0.25}
 
 
 @pytest.mark.parametrize("settings, message", [
     ({"untrust_on_first_packet_reject": "no"}, "true or false"),
     ({"surprise": True}, "unknown key"),
     ([], "must be an object"),
+    ({"spike_window_seconds": 1}, "out of range 2..300"),
+    ({"spike_detection": 1}, "true or false"),
+    ({"spike_max_fraction": 0}, "greater than 0"),
+    ({"spike_max_fraction": 1.5}, "at most 1"),
+    ({"spike_elevated_p": True}, "expected a number"),
+    ({"spike_p": 0.02}, "spike_p must be smaller"),
 ])
 def test_bad_settings_are_refused(settings, message):
     with pytest.raises(RulesError, match=message):
@@ -378,7 +387,7 @@ def test_first_packet_rule_can_be_turned_off():
 def test_details_report_settings():
     iface, _, _ = plain([], {"untrust_on_first_packet_reject": False})
     details = iface.details()["read_protocols"][0]["firewall"]
-    assert details["settings"] == {"untrust_on_first_packet_reject": False}
+    assert details["settings"] == {**DEFAULT_SETTINGS, "untrust_on_first_packet_reject": False}
     assert details["extensions"] == {}
 
 

@@ -14,6 +14,13 @@
   packet counted per APID, plus panels and admin actions that extensions
   describe (e.g. the SDLS plugin's frame counts and Reset anti-replay counter).
 
+  The Audit log tab (AuditLog.vue) shows what admins did and every rules
+  change, newest first, with filters and a JSON export (admins only).
+
+  The Quarantine tab (QuarantineReview.vue) lists the packets the firewall
+  rejected, with why, for admins only: review states, the bytes as a hex dump,
+  and Release (an admin request: the firewall sends the packet on, once).
+
   Every interface running the firewall protocol can be edited (the selector at
   the top); each has its own rules. Interfaces with an extension in front of
   the firewall (e.g. the eaglegate-sdls plugin) also show the extension's rules
@@ -82,10 +89,36 @@
         <v-btn variant="text" @click="openTrustDialog">Restore trust…</v-btn>
       </template>
     </v-alert>
+    <v-alert
+      v-if="state?.settings?.enforcement === 'monitor'"
+      type="warning"
+      variant="tonal"
+      density="compact"
+      class="ma-2"
+    >
+      Monitor mode: {{ interfaceName }}'s firewall is delivering every packet
+      and only recording what its rules would deny (Quarantine tab, "WOULD
+      DENY"). The structural header check still applies. Set Enforcement to
+      enforce in the rules' settings to block again.
+    </v-alert>
     <v-tabs v-model="tab" class="mx-2" color="primary">
       <v-tab value="rules">Rules</v-tab>
       <v-tab value="link">Link status</v-tab>
+      <v-tab value="quarantine">Quarantine</v-tab>
+      <v-tab value="audit">Audit log</v-tab>
     </v-tabs>
+
+    <!-- What admins did and every rules change; admins only (the review
+         microservice asks COSMOS); loads only while shown -->
+    <audit-log v-if="tab === 'audit'" :interface-name="interfaceName" />
+
+    <!-- Rejected packets: list, filter, review, release. Admins only (the
+         review microservice asks COSMOS); loads only while shown -->
+    <quarantine-review
+      v-if="tab === 'quarantine'"
+      :interface-name="interfaceName"
+      :focus="focus"
+    />
 
     <!-- Live counts, extension panels and admin actions; polls only while shown -->
     <link-status
@@ -289,12 +322,10 @@
               cols="12"
               md="6"
             >
-              <v-switch
+              <schema-field
+                :spec="spec"
                 :model-value="settingValue(doc, schema, key)"
                 :label="spec.title || key"
-                :hint="spec.help"
-                persistent-hint
-                color="primary"
                 :readonly="readonly"
                 @update:model-value="setSetting(doc, schema, key, $event)"
               />
@@ -373,6 +404,15 @@
                   >
                     {{ rule.action }}
                   </v-chip>
+                  <v-chip
+                    v-if="rule.monitor === true"
+                    size="small"
+                    variant="outlined"
+                    color="warning"
+                    class="ml-1"
+                    title="Only records its denials; the rules below decide"
+                    >monitor</v-chip
+                  >
                 </td>
                 <td class="text-caption">{{ matchSummary(rule.match) }}</td>
                 <td class="text-right">{{ hits(rule.id) }}</td>
@@ -521,6 +561,27 @@
               {{ warning }}
             </div>
           </v-alert>
+          <v-textarea
+            v-model="changeReason"
+            label="Reason for this change (kept in the audit log)"
+            :error-messages="
+              changeReason ? reasonProblem(changeReason) || [] : []
+            "
+            counter="256"
+            rows="1"
+            auto-grow
+            class="mb-2"
+          />
+          <v-alert
+            v-if="toApply && toApply.doc.settings?.enforcement === 'monitor'"
+            type="warning"
+            variant="tonal"
+            density="compact"
+            class="mb-2"
+          >
+            These rules are in monitor mode: the firewall will deliver every
+            packet and only record what it would deny.
+          </v-alert>
           <pre class="diff"><span
             v-for="(row, i) in shownDiffRows"
             :key="i"
@@ -538,6 +599,7 @@
             color="primary"
             variant="flat"
             :loading="applying"
+            :disabled="!!reasonProblem(changeReason)"
             @click="apply"
             >Apply</v-btn
           >
@@ -622,7 +684,10 @@
 
 <script>
 import { TopBar } from '@openc3/vue-common/components'
+import AuditLog from './AuditLog.vue'
 import LinkStatus from './LinkStatus.vue'
+import QuarantineReview from './QuarantineReview.vue'
+import { quarantineFocus } from '../../widgets/recentRejections.js'
 import RuleEditor from './RuleEditor.vue'
 import SchemaField from './SchemaField.vue'
 import { reasonProblem } from './adminRequest.js'
@@ -662,7 +727,14 @@ const EMPTY_RULES = { version: 0, default_action: 'DENY', rules: [] }
 const INTERFACE_KEY = 'eaglegate.interface' // remembers the last interface edited
 
 export default {
-  components: { LinkStatus, RuleEditor, SchemaField, TopBar },
+  components: {
+    AuditLog,
+    LinkStatus,
+    QuarantineReview,
+    RuleEditor,
+    SchemaField,
+    TopBar,
+  },
   data() {
     return {
       title: 'EagleGate Firewall Rules',
@@ -691,9 +763,11 @@ export default {
       reviewing: false,
       applying: false,
       toApply: null,
+      changeReason: '', // why the rules change: goes to the audit log with the apply
       history: { open: false, items: [] },
       trust: { open: false, reason: '', busy: false },
       tab: 'rules',
+      focus: {}, // ?tab=quarantine&interface=&stream=&entry= (FIREWALLREJECTIONS widget links)
       fullDiff: false, // review dialog: whole file instead of only the changes
     }
   },
@@ -817,9 +891,23 @@ export default {
       return
     }
     await this.findInterfaces()
+    this.applyFocus()
     await this.load()
   },
   methods: {
+    // A link from the FIREWALLREJECTIONS widget: open that entry's interface on
+    // the Quarantine tab (the review service still decides who may see it)
+    applyFocus() {
+      const focus = quarantineFocus(window.location.search)
+      if (!focus.tab) return
+      if (
+        focus.interface &&
+        this.interfaces.some((i) => i.name === focus.interface)
+      )
+        this.interfaceName = focus.interface
+      this.focus = focus
+      this.tab = 'quarantine'
+    },
     settingValue,
     setSetting,
     reasonProblem,
@@ -1061,6 +1149,7 @@ export default {
       const doc = withBumpedVersion(this.doc, this.state.rules.version)
       this.toApply = { doc, text: toFileText(doc) }
       this.fullDiff = false
+      this.changeReason = ''
       this.reviewing = true
     },
     async apply() {
@@ -1070,6 +1159,7 @@ export default {
           this.interfaceName,
           this.toApply.text,
           this.baseSha256,
+          this.changeReason,
         )
         this.state = state
         this.baseSha256 = state.rules.sha256

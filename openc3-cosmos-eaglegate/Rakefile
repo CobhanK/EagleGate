@@ -35,14 +35,16 @@ task :build => [:require_version] do
       sh('pnpm run build') do |ok, status|
         raise "pnpm run build failed" if !ok
       end
-    elsif File.exist?('tools/eaglegate/main.js')
+    elsif File.exist?('tools/eaglegate/main.js') &&
+          File.exist?('tools/widgets/FirewallrejectionsWidget/FirewallrejectionsWidget.umd.min.js')
       puts "Warning: pnpm not found; packaging the tool page already built in tools/eaglegate/"
       puts "         (run `pnpm build` first if you changed anything under src/)"
       # The schema may have just been regenerated; keep the packaged page in step
       FileUtils.cp('public/eaglegate_rules_schema.json', 'tools/eaglegate/eaglegate_rules_schema.json')
     else
       raise <<~MSG
-        pnpm not found and the tool page has not been built (no tools/eaglegate/main.js).
+        pnpm not found and the tool page or widget has not been built (no tools/eaglegate/main.js
+        or tools/widgets/FirewallrejectionsWidget/FirewallrejectionsWidget.umd.min.js).
         `openc3.sh cli rake build` runs without Node, so build the page first, either:
           - locally:  pnpm install --frozen-lockfile --ignore-scripts && pnpm build
           - or in the openc3-node container (see README.md), which can also run the whole rake build

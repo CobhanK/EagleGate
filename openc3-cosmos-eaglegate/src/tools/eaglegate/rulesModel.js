@@ -240,6 +240,10 @@ export function validate(doc, schema) {
     }
     if (!type.actions.includes(rule.action))
       errors.push(`${where}.action must be one of ${type.actions.join(', ')}`)
+    if (rule.monitor !== undefined && typeof rule.monitor !== 'boolean')
+      errors.push(`${where}.monitor must be true or false`)
+    else if (rule.monitor === true && rule.action !== 'DENY')
+      errors.push(`${where}.monitor only applies to DENY rules`)
     if (rule.match === undefined)
       errors.push(`${where} is missing 'match' (use {} to match everything)`)
     else checkMatch(rule.match, `${where}.match`, schema, errors)
@@ -464,7 +468,9 @@ export function settingValue(doc, schema, key) {
 // Write a setting, leaving defaults out of the file so diffs stay small
 export function setSetting(doc, schema, key, value) {
   const settings = { ...(doc.settings || {}) }
-  if (value === schema.settings[key].default) delete settings[key]
+  // Equal to the default, or emptied: leave it out (the firewall uses the default)
+  if (value === undefined || value === schema.settings[key].default)
+    delete settings[key]
   else settings[key] = value
   if (Object.keys(settings).length) doc.settings = settings
   else delete doc.settings

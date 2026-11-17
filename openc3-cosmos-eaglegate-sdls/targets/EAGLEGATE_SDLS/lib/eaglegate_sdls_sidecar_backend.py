@@ -37,6 +37,7 @@ from eaglegate_sdls_frame_security import (CLEAR, DECRYPTED, FAILED, REFUSED, UN
 KEY_ENV = "EAGLEGATE_SIDECAR_KEY"
 MAX_BACKOFF = 30.0
 INFO_REFRESH = 60.0  # seconds between re-reading the sidecar's SA table and keys
+RELOAD_TIMEOUT = 10.0  # seconds a key reload may take (reads the secret, fingerprints keys)
 EPOCH_CHARS = 16     # fingerprint characters in a key epoch
 
 
@@ -63,6 +64,7 @@ class SidecarCrypto(FrameSecurity):
         self.next_id = 1
         self.info = None
         self.info_at = None
+        self.info_stale = False   # set by reload_keys (command thread): re-read info before the next frame
         self.mismatch = {}        # spi -> why the sidecar's SA differs from the rules
         self.down_until = 0.0
         self.backoff = 1.0
@@ -190,6 +192,8 @@ class SidecarCrypto(FrameSecurity):
             "backend": self.name, "host": self.crypto.host, "port": self.crypto.port,
             "connected": self.session is not None, "sidecar": info.get("sidecar"), "cryptolib": info.get("cryptolib"),
             "key_source": info.get("key_source"),
+            "key_problems": "; ".join(info.get("key_problems") or []) or None,
+            "key_reloads": info.get("key_reloads"),
             "sa_match": (not self.mismatch) if self.info else None,
             "mismatch": {str(k): v for k, v in sorted(self.mismatch.items())},
             "test_key_spis": sorted(int(s) for s, r in (info.get("security_associations") or {}).items()
@@ -208,12 +212,56 @@ class SidecarCrypto(FrameSecurity):
         self.session = None
         self.buffer = b""
 
+    def reload_keys(self):
+        """Ask the sidecar to re-read its key secret (decision D12). Runs on the
+        interface's command thread, so it uses a connection and session of its
+        own and never touches the read thread's socket. Returns (ok, detail,
+        problems); afterwards the read thread re-reads info (new fingerprints,
+        so EagleGate's key epochs start new anti-replay baselines)."""
+        if self.key is None:
+            return False, self.key_problem, []
+        sock, buffer = None, b""
+
+        def send(message):
+            sock.sendall(wire.encode(message))
+
+        def receive():
+            nonlocal buffer
+            while True:
+                message, buffer = wire.decode(buffer)
+                if message is not None:
+                    return message
+                chunk = sock.recv(65536)
+                if not chunk:
+                    raise OSError("the sidecar closed the connection")
+                buffer += chunk
+
+        try:
+            sock = self.connector(self.crypto.host, self.crypto.port, RELOAD_TIMEOUT)
+            nonce = wire.new_nonce()
+            send(wire.hello_request(self.crypto.key_id, nonce))
+            session = wire.parse_hello_response(receive(), self.key, self.crypto.key_id, nonce)
+            send(wire.sign(self.key, session, "request", wire.reload_keys_request(1)))
+            answer = receive()
+            wire.check_response(answer, self.key, session, "reload_keys", 1)
+            ok, _, problems, detail = wire.parse_reload_keys_response(answer)
+        except (OSError, wire.SidecarProtocolError) as error:
+            return False, f"no answer from the sidecar at {self.crypto.host}:{self.crypto.port}: {error}", []
+        finally:
+            if sock is not None:
+                try:
+                    sock.close()
+                except OSError:
+                    pass
+        self.info_stale = True
+        return ok, detail, problems
+
     # ---- connection ------------------------------------------------------------
 
     def _ready(self):
         now = self.clock()
         if self.session is not None:
-            if self.info_at is not None and now - self.info_at > INFO_REFRESH:
+            if self.info_stale or (self.info_at is not None and now - self.info_at > INFO_REFRESH):
                 try:
                     self._load_info()
                 except (OSError, wire.SidecarProtocolError) as error:
@@ -243,6 +291,7 @@ class SidecarCrypto(FrameSecurity):
             raise wire.SidecarProtocolError("info answer without security_associations")
         self.info = answer
         self.info_at = self.clock()
+        self.info_stale = False
         self.mismatch = self._compare(answer)
 
     def _call(self, build, *args):

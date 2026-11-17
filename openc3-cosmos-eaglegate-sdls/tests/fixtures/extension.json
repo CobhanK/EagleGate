@@ -19,6 +19,14 @@
         }
       },
       "title": "Reset anti-replay counter"
+    },
+    {
+      "command": "RELOAD_KEYS",
+      "confirm": "Frames protected with a key that is no longer active are refused from now on. If the key file cannot be read at all, the sidecar keeps its current keys.",
+      "help": "The sidecar re-reads its key secret (key_source custom) into CryptoLib's key ring, e.g. after a rekey: change the secret (a new key as active, the old one deactivated), then reload. Frames are then checked with the new keys; a new key starts a new anti-replay baseline.",
+      "name": "reload_keys",
+      "params": {},
+      "title": "Reload SDLS keys"
     }
   ],
   "api_versions": [
@@ -94,11 +102,19 @@
       "title": "Frames"
     },
     {
+      "actions": [
+        {
+          "action": "reload_keys",
+          "title": "Reload keys"
+        }
+      ],
       "help": "NASA CryptoLib in the eaglegate-sdls-sidecar container (link.crypto.backend sidecar). Keys stay there; EagleGate sees only their fingerprints.",
       "items": {
         "backend": "Backend",
         "connected": "Connected",
         "cryptolib": "CryptoLib",
+        "key_problems": "Key problems",
+        "key_reloads": "Key reloads",
         "key_source": "Key source",
         "last_error": "Last error",
         "latency_ms": "Latency (ms)",

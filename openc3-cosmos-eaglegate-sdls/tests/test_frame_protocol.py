@@ -329,7 +329,7 @@ def test_reset_replay_after_the_spacecraft_lost_its_counters(valkey):
     assert action["previous"]["7"]["value"] == "5000"
     iface.chunks = rebooted.add(hk(3)).cadus()
     assert buffers(read_all(iface)) == [hk(3)]
-    [audit] = valkey.stream("_AUDIT__" + IFACE)
+    [audit] = [a for a in valkey.stream("_AUDIT__" + IFACE) if a["action"] != "LOAD_RULES"]
     assert audit["action"] == "RESET_REPLAY" and audit["spi"] == "7"
     assert sdls.status_items()["REPLAY_RESETS"] == 1
 
@@ -409,11 +409,14 @@ def test_link_status_items_fit_the_packet_definition(telemetry):
         "RECEIVED_COUNT"}
 
 
-def test_firewall_status_definition_is_the_core_one():
+@pytest.mark.parametrize("packet_name", ["FIREWALL_STATUS", "FIREWALL_RECENT"])
+def test_firewall_status_definition_is_the_core_one(packet_name):
+    """The firewall publishes these packets to whatever target it runs under, so
+    this target must define them exactly as the core does."""
     def block(path):
         with open(path) as f:
             text = f.read()
-        start = text.index("FIREWALL_STATUS BIG_ENDIAN")
+        start = text.index(f"{packet_name} BIG_ENDIAN")
         end = text.find("\nTELEMETRY", start)
         lines = text[start:end if end > 0 else None].splitlines()[1:]
         return [line for line in lines if line.strip() and not line.lstrip().startswith("#")]
@@ -569,3 +572,57 @@ def test_real_udp_interface_on_localhost():
     finally:
         sender.close()
         iface.disconnect()
+
+
+# ---- RELOAD_KEYS (decision D12) ----------------------------------------------------
+
+class ReloadingBackend:
+    def __init__(self, answer):
+        self.answer = answer
+        self.calls = 0
+
+    def reload_keys(self):
+        self.calls += 1
+        return self.answer
+
+    def close(self):
+        pass
+
+
+def test_reload_keys_is_an_audited_admin_action(valkey):
+    iface, sdls, fw, store = build()
+    sdls.backend = ReloadingBackend((True, "2 key(s) loaded", []))
+    iface.protocol_cmd("RELOAD_KEYS", upload(store, kind="reload_keys"), read_write="READ")
+    action = fw.admin_actions[-1]
+    assert (action["action"], action["ok"], action["detail"]) == ("RELOAD_KEYS", True, "sidecar: 2 key(s) loaded")
+    [audit] = [a for a in valkey.stream("_AUDIT__" + IFACE) if a["action"] == "RELOAD_KEYS"]
+    assert audit["ok"] == "true" and audit["reason"] == "spacecraft rebooted without saved counters"
+
+
+def test_reload_keys_problems_are_recorded():
+    iface, sdls, fw, store = build()
+    sdls.backend = ReloadingBackend((True, "1 key(s) loaded", ["SPI 6: its encryption key 9 is not loaded"]))
+    iface.protocol_cmd("RELOAD_KEYS", upload(store, kind="reload_keys"), read_write="READ")
+    action = fw.admin_actions[-1]
+    assert action["ok"] and "problems: SPI 6: its encryption key 9 is not loaded" in action["detail"]
+    assert action["problems"] == ["SPI 6: its encryption key 9 is not loaded"]
+
+
+def test_reload_keys_needs_an_admin_request_and_a_sidecar():
+    iface, sdls, fw, store = build()
+    stub = ReloadingBackend((True, "", []))
+    sdls.backend = stub
+    iface.protocol_cmd("RELOAD_KEYS", "0" * 64, read_write="READ")
+    assert not fw.admin_actions[-1]["ok"] and stub.calls == 0
+    iface.protocol_cmd("RELOAD_KEYS", upload(store, kind="reload_keys", spi=7), read_write="READ")
+    assert "takes no parameters" in fw.admin_actions[-1]["detail"] and stub.calls == 0
+    sdls.backend = None
+    iface.protocol_cmd("RELOAD_KEYS", upload(store, kind="reload_keys"), read_write="READ")
+    assert "not sidecar" in fw.admin_actions[-1]["detail"]
+
+
+def test_reload_keys_is_offered_on_the_crypto_backend_panel():
+    names = [a["name"] for a in EXTENSION.actions]
+    assert "reload_keys" in names
+    crypto_panel = next(p for p in EXTENSION.panels if p["title"] == "Crypto backend")
+    assert crypto_panel["actions"] == [{"action": "reload_keys", "title": "Reload keys"}]

@@ -1,5 +1,5 @@
 """SidecarCrypto (eaglegate_sdls_sidecar_backend) against the sidecar's real
-server code (../eaglegate-sdls-sidecar) over real TCP sockets, with a stand-in
+server code (../sidecar) over real TCP sockets, with a stand-in
 for CryptoLib. CryptoLib itself is tested in the sidecar's test image."""
 import hashlib
 import os
@@ -18,8 +18,8 @@ from eaglegate_sdls_sidecar_backend import SidecarCrypto
 from eaglegate_sdls_tm_frame import PrimaryHeader, parse_tm_frame
 from sdls_frames import Layout, build_frame, packet
 
-SIDECAR_DIR = os.path.join(os.path.dirname(__file__), "..", "..", "eaglegate-sdls-sidecar")
-pytestmark = pytest.mark.skipif(not os.path.isdir(SIDECAR_DIR), reason="eaglegate-sdls-sidecar not found")
+SIDECAR_DIR = os.path.join(os.path.dirname(__file__), "..", "sidecar")
+pytestmark = pytest.mark.skipif(not os.path.isdir(SIDECAR_DIR), reason="sidecar folder not found")
 if os.path.isdir(SIDECAR_DIR):
     sys.path.insert(0, SIDECAR_DIR)
 
@@ -62,12 +62,12 @@ class FakeEngine:
 
 
 class Sidecar:
-    """The real sidecar server (sidecar.server) on a free localhost port."""
+    """The real sidecar server (eaglegate_sidecar.server) on a free localhost port."""
 
     def __init__(self, sas=None, keys=None, known=KNOWN_TEST_KEYS):
-        from sidecar import config as cfg
-        from sidecar.server import Sidecar as Logic
-        from sidecar.server import SidecarServer
+        from eaglegate_sidecar import config as cfg
+        from eaglegate_sidecar.server import Sidecar as Logic
+        from eaglegate_sidecar.server import SidecarServer
 
         config = cfg.parse({"tm": {"scid": 3, "frame_length": 1786}, "security_associations": sas or SIDECAR_SAS})
         self.engine = FakeEngine(config)
@@ -234,7 +234,7 @@ def test_reconnects_after_the_sidecar_restarts():
     assert crypto.process(tm(config, 7, 5, sn=1), config.sas[7]).status == VERIFIED
     first.stop()
     assert crypto.process(tm(config, 7, 5, sn=2), config.sas[7]).status == UNAVAILABLE
-    from sidecar.server import SidecarServer
+    from eaglegate_sidecar.server import SidecarServer
 
     second = Sidecar()
     second.stop()
@@ -334,3 +334,88 @@ def test_a_silent_sidecar_times_out():
     result = crypto.process(tm(config, 7, 5, sn=1), config.sas[7])
     assert result.status == UNAVAILABLE and "no answer within 50 ms" in result.detail
     assert crypto.counts["timeouts"] == 1
+
+
+# ---- key reload (decision D12) -----------------------------------------------------
+
+class CustomEngine(FakeEngine):
+    """FakeEngine with a custom key ring the sidecar can reload."""
+
+    custom = True
+
+    def __init__(self, config):
+        super().__init__(config)
+        self.load_problems = []
+        self.ring = {9: bytes([9]) * 32, 130: bytes([1]) * 32}
+
+    def load_keys(self, keys):
+        self.ring = {key_id: bytes(value) for key_id, value, _ in keys}
+        return []
+
+    def key(self, key_id):
+        return bytearray(self.ring.get(key_id, b"")), "active"
+
+    def expected_key_length(self, kind, suite):
+        return 32
+
+
+@pytest.fixture
+def custom_sidecar(tmp_path):
+    import json as json_
+
+    from eaglegate_sidecar import config as cfg
+    from eaglegate_sidecar.server import Sidecar as Logic
+    from eaglegate_sidecar.server import SidecarServer
+
+    key_file = tmp_path / "keys.json"
+    key_file.write_text(json_.dumps({"keys": [{"id": 9, "hex": "09" * 32}, {"id": 130, "hex": "01" * 32}]}))
+    config = cfg.parse({"tm": {"scid": 3, "frame_length": 1786}, "key_source": "custom",
+                        "security_associations": SIDECAR_SAS})
+    logic = Logic(config, CustomEngine(config), {"default": KEY}, KNOWN_TEST_KEYS, str(key_file), [])
+    server = SidecarServer(("127.0.0.1", 0), logic)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    yield server, key_file
+    server.shutdown()
+    server.close_connections()
+    server.server_close()
+
+
+def test_reload_keys_uses_its_own_session_and_new_fingerprints_follow(custom_sidecar):
+    import json as json_
+
+    server, key_file = custom_sidecar
+    config = link(server.server_address[1])
+    crypto = backend(config)
+    assert crypto._ready()
+    before = crypto.key_epoch(7)
+    key_file.write_text(json_.dumps({"keys": [{"id": 9, "hex": "09" * 32}, {"id": 130, "hex": "02" * 32}]}))
+    ok, detail, problems = crypto.reload_keys()
+    assert (ok, problems) == (True, []) and detail == "2 key(s) loaded"
+    assert crypto.session is not None  # the read thread's session was not touched
+    assert crypto.info_stale
+    assert crypto._ready() and not crypto.info_stale
+    assert crypto.key_epoch(7) != before  # a new key: EagleGate starts a new anti-replay baseline
+    assert crypto.status()["key_reloads"] == 1
+
+
+def test_reload_keys_reports_problems_and_refusals(custom_sidecar):
+    import json as json_
+
+    server, key_file = custom_sidecar
+    crypto = backend(link(server.server_address[1]))
+    key_file.write_text(json_.dumps({"keys": [{"id": 130, "hex": "02" * 32}]}))
+    ok, _, problems = crypto.reload_keys()
+    assert ok and problems == ["SPI 6: its encryption key 9 is not loaded"]
+    assert crypto._ready() and crypto.status()["key_problems"] == "SPI 6: its encryption key 9 is not loaded"
+    key_file.write_text("{ broken")
+    ok, detail, _ = crypto.reload_keys()
+    assert not ok and "keys unchanged" in detail
+
+
+def test_reload_keys_without_a_sidecar_or_channel_key():
+    port = free_port()
+    crypto = backend(link(port))
+    ok, detail, _ = crypto.reload_keys()
+    assert not ok and "no answer from the sidecar" in detail
+    keyless = backend(link(port), env={})
+    assert keyless.reload_keys()[0] is False

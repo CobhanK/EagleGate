@@ -11,13 +11,18 @@ DEST="$DEST_PARENT/openc3-cosmos-eaglegate"
 # The SDLS extension plugin (needs the core plugin installed first)
 SDLS_SRC="$SCRIPT_DIR/openc3-cosmos-eaglegate-sdls"
 SDLS_DEST="$DEST_PARENT/openc3-cosmos-eaglegate-sdls"
-# The CryptoLib sidecar (a Docker image next to COSMOS, not a plugin)
-SIDECAR_DIR="$SCRIPT_DIR/eaglegate-sdls-sidecar"
+# The CryptoLib sidecar: a Docker image that runs next to COSMOS (not part of the
+# gem). Its sources live in the SDLS plugin folder, which is its build context.
+SIDECAR_DIR="$SDLS_SRC/sidecar"
 SIDECAR_IMAGE="${SIDECAR_IMAGE:-eaglegate-sdls-sidecar:latest}"
 SIDECAR_NAME="${SIDECAR_NAME:-eaglegate-sdls-sidecar}"
 SIDECAR_NETWORK="${SIDECAR_NETWORK:-cosmos_default}"   # COSMOS's docker network
 SIDECAR_KEY_FILE="${SIDECAR_KEY_FILE:-$SIDECAR_DIR/secrets/channel.key}"
 SIDECAR_CONFIG="${SIDECAR_CONFIG:-$SIDECAR_DIR/config/nos3.json}"
+# Real SDLS keys (sidecar key_source "custom"): a folder holding keys.json, mounted
+# read-only as a FOLDER so an edited key file is seen by RELOAD_KEYS (a bind mount
+# of a single file keeps the old file when an editor replaces it). Never committed.
+SDLS_KEYS_DIR="${SDLS_KEYS_DIR:-$SIDECAR_DIR/secrets/sdls}"
 
 # echo $SCRIPT_DIR
 # echo $SRC
@@ -65,8 +70,16 @@ build_plugin() {
     # Remove any previous copy so the result is always a fresh copy
     rm -rf "$dest"
     cp -R "$src" "$dest"
+    # The sidecar is not part of the gem; never copy its sources or channel key into cosmos
+    rm -rf "$dest/sidecar"
     echo "Copied $dest into $DEST_PARENT"
     (cd "$dest" && ../openc3.sh cli rake build VERSION="$VERSION")
+}
+
+# The CryptoLib sidecar's Docker image (not a gem: started with run-sidecar)
+build_sidecar() {
+    docker build -f "$SIDECAR_DIR/Dockerfile" --target runtime -t "$SIDECAR_IMAGE" "$SDLS_SRC"
+    echo "Built the sidecar image $SIDECAR_IMAGE"
 }
 
 clean_plugin() {
@@ -80,22 +93,27 @@ clean_plugin() {
 }
 
 case "$COMMAND" in
-    build)
+    build-core)
         build_plugin "$SRC" "$DEST"
         ;;
     build-sdls)
         build_plugin "$SDLS_SRC" "$SDLS_DEST"
         ;;
-    build-all)
+    build-core-sdls)
         build_plugin "$SRC" "$DEST"
         build_plugin "$SDLS_SRC" "$SDLS_DEST"
         ;;
+    build-all)
+        build_plugin "$SRC" "$DEST"
+        build_plugin "$SDLS_SRC" "$SDLS_DEST"
+        build_sidecar
+        ;;
     build-sidecar)
-        docker build -f "$SIDECAR_DIR/Dockerfile" --target runtime -t "$SIDECAR_IMAGE" "$SCRIPT_DIR"
+        build_sidecar
         ;;
     test-sidecar)
         # The sidecar's tests against the real CryptoLib (test image only)
-        docker build -f "$SIDECAR_DIR/Dockerfile" --target test -t eaglegate-sdls-sidecar:test "$SCRIPT_DIR"
+        docker build -f "$SIDECAR_DIR/Dockerfile" --target test -t eaglegate-sdls-sidecar:test "$SDLS_SRC"
         docker run --rm eaglegate-sdls-sidecar:test
         ;;
     sidecar-key)
@@ -116,6 +134,12 @@ case "$COMMAND" in
             exit 1
         fi
         docker rm -f "$SIDECAR_NAME" >/dev/null 2>&1 || true
+        SDLS_KEYS_MOUNT=()
+        if [[ -f "$SDLS_KEYS_DIR/keys.json" ]]; then
+            SDLS_KEYS_MOUNT=(-v "$SDLS_KEYS_DIR:/run/secrets/eaglegate_sdls:ro"
+                             -e EAGLEGATE_SDLS_KEY_FILE=/run/secrets/eaglegate_sdls/keys.json)
+            echo "Mounting the SDLS keys in $SDLS_KEYS_DIR (used when the config has key_source custom)"
+        fi
         # Read-only root, no capabilities, scratch dir in tmpfs (CryptoLib writes
         # sa_save_file.bin there at start), on COSMOS's network only (no port published)
         docker run -d --name "$SIDECAR_NAME" --network "$SIDECAR_NETWORK" --restart unless-stopped \
@@ -123,6 +147,7 @@ case "$COMMAND" in
             --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 256m \
             -v "$SIDECAR_KEY_FILE:/run/secrets/eaglegate_sidecar_key:ro" \
             -v "$SIDECAR_CONFIG:/etc/eaglegate-sidecar/sidecar.json:ro" \
+            ${SDLS_KEYS_MOUNT[@]+"${SDLS_KEYS_MOUNT[@]}"} \
             "$SIDECAR_IMAGE"
         echo "Started $SIDECAR_NAME on network $SIDECAR_NETWORK (config $SIDECAR_CONFIG); logs: docker logs $SIDECAR_NAME"
         ;;
@@ -153,20 +178,22 @@ case "$COMMAND" in
         ;;
     help)
         echo "Assuming cosmos is in the same folder as EagleGate:"
-        echo "build [-v 1.x.x] : copies eaglegate into cosmos folder (deletes if exists there already)"
-        echo "                   and builds the plugin gem (version defaults to $VERSION)"
-        echo "build-sdls [-v 1.x.x] : the same for the SDLS extension plugin (install the core plugin first)"
-        echo "build-all [-v 1.x.x]  : builds both plugins"
+        echo "build-core [-v 1.x.x]      : copies the core firewall plugin into the cosmos folder (replacing"
+        echo "                             an old copy) and builds its gem (version defaults to $VERSION)"
+        echo "build-sdls [-v 1.x.x]      : the same for the SDLS plugin only (install the core plugin first)"
+        echo "build-core-sdls [-v 1.x.x] : both plugin gems, no sidecar"
+        echo "build-all [-v 1.x.x]       : both plugin gems and the sidecar image (needs Docker)"
         echo "clean : removes eaglegate and eaglegate-sdls from cosmos folder"
         echo "run|stop : starts or stops openc3 cosmos containers on local"
-        echo "build-sidecar  : builds the CryptoLib sidecar image ($SIDECAR_IMAGE)"
+        echo "build-sidecar  : builds only the CryptoLib sidecar image ($SIDECAR_IMAGE)"
         echo "test-sidecar   : runs the sidecar's tests against the real CryptoLib"
         echo "sidecar-key    : creates the EagleGate <-> sidecar channel key ($SIDECAR_KEY_FILE)"
         echo "run-sidecar|stop-sidecar : starts or stops the sidecar on $SIDECAR_NETWORK"
-        echo "                 (SIDECAR_CONFIG=... picks the SA configuration, default config/nos3.json)"
+        echo "                 (SIDECAR_CONFIG=... picks the SA configuration, default config/nos3.json;"
+        echo "                  real SDLS keys: key_source custom in it, keys in $SDLS_KEYS_DIR/keys.json)"
     ;;
     *)
-        echo "Usage: $0 {build|build-sdls|build-all [-v 1.x.x]|clean|run|stop|build-sidecar|test-sidecar|sidecar-key|run-sidecar|stop-sidecar|help}" >&2
+        echo "Usage: $0 {build-core|build-sdls|build-core-sdls|build-all [-v 1.x.x]|clean|run|stop|build-sidecar|test-sidecar|sidecar-key|run-sidecar|stop-sidecar|help}" >&2
         exit 1
         ;;
 esac
