@@ -28,8 +28,12 @@ class EngineError(RuntimeError):
 class CryptoLibEngine:
     """One CryptoLib instance in this process (CryptoLib allows only one)."""
 
-    def __init__(self, sidecar_config, library=None):
+    def __init__(self, sidecar_config, library=None, custom_keys=None):
+        """custom_keys: [(id, bytearray, state code)] for key_source "custom"
+        (keystore.read_key_file). The caller wipes its bytearrays afterwards."""
         self.config = sidecar_config
+        self.custom = sidecar_config.key_source == "custom"
+        self.load_problems = []  # keys CryptoLib's key ring refused at start
         self.lock = threading.Lock()
         if not os.access(os.getcwd(), os.W_OK):
             # CryptoLib 1.5.1's Crypto_Init writes sa_save_file.bin into the
@@ -38,6 +42,7 @@ class CryptoLibEngine:
                               "sa_save_file.bin there at start); run in a scratch directory or tmpfs")
         self.lib = ctypes.CDLL(library or os.environ.get("EG_CRYPTOLIB_SHIM", DEFAULT_LIBRARY))
         self._declare()
+        self._custom_keys = custom_keys or []
         version = self.lib.eg_cryptolib_version()
         self.version = f"{version // 10000}.{version // 100 % 100}.{version % 100}"
         if self.lib.eg_num_sa() < cfg.NUM_SA or self.lib.eg_num_keys() < cfg.NUM_KEYS:
@@ -53,7 +58,10 @@ class CryptoLibEngine:
         lib.eg_num_sa.restype = c_int
         lib.eg_num_keys.restype = c_int
         lib.eg_abm_size.restype = c_int
-        lib.eg_configure.argtypes = [c_int]
+        lib.eg_configure.argtypes = [c_int, c_int]
+        lib.eg_key_set.argtypes = [c_int, u8_p, c_int, c_int]
+        lib.eg_ecs_keylen.argtypes = [c_int]
+        lib.eg_acs_keylen.argtypes = [c_int]
         lib.eg_add_tm_channel.argtypes = [c_int] * 6
         lib.eg_set_sa.argtypes = [c_int] * 16 + [u8_p, c_int]
         lib.eg_get_sa.argtypes = [ctypes.POINTER(ctypes.c_int32), u8_p, c_int, c_int_p]
@@ -63,7 +71,8 @@ class CryptoLibEngine:
         lib.eg_status_name.argtypes = [c_int]
         lib.eg_status_name.restype = ctypes.c_char_p
         for name in ("eg_configure", "eg_add_tm_channel", "eg_init", "eg_shutdown", "eg_disable_all_sas",
-                     "eg_set_sa", "eg_get_sa", "eg_get_key", "eg_tm_process"):
+                     "eg_set_sa", "eg_get_sa", "eg_get_key", "eg_tm_process", "eg_key_clear", "eg_key_set",
+                     "eg_ecs_keylen", "eg_acs_keylen"):
             getattr(lib, name).restype = c_int
 
     def _check(self, status, what):
@@ -73,7 +82,11 @@ class CryptoLibEngine:
     def _setup(self):
         tm = self.config.tm
         with self.lock:
-            self._check(self.lib.eg_configure(int(tm.has_fecf)), "Crypto_Config")
+            self._check(self.lib.eg_configure(int(tm.has_fecf), int(self.custom)), "Crypto_Config")
+            if self.custom:
+                # The custom ring starts empty (never CryptoLib's test keys)
+                self.load_problems = self._load_keys(self._custom_keys)
+            self._custom_keys = None
             for vcid in self.config.channels:
                 self._check(self.lib.eg_add_tm_channel(tm.tfvn, tm.scid, vcid, int(tm.has_fecf), tm.frame_length,
                                                        int(tm.has_ocf)), f"managed parameters for VC {vcid}")
@@ -96,6 +109,30 @@ class CryptoLibEngine:
             different = sorted(k for k, v in expected.items() if held.get(k) != v)
             if different:
                 raise EngineError(f"CryptoLib holds different settings for SA {sa.spi}: {different}")
+
+    def load_keys(self, keys):
+        """Replace every key in CryptoLib's custom ring, atomically with respect
+        to frame processing (one lock). Returns the keys the ring refused."""
+        if not self.custom:
+            raise EngineError('keys can only be loaded with key_source "custom"')
+        with self.lock:
+            return self._load_keys(keys)
+
+    def _load_keys(self, keys):
+        self._check(self.lib.eg_key_clear(), "clearing the key ring")
+        problems = []
+        for key_id, value, state in keys:
+            buffer = (ctypes.c_uint8 * len(value)).from_buffer(value)  # no copy: the caller wipes value
+            status = self.lib.eg_key_set(key_id, buffer, len(value), state)
+            if status != SUCCESS:
+                problems.append(f"key {key_id}: CryptoLib's key ring refused it ({self.status_name(status)})")
+        return problems
+
+    def expected_key_length(self, kind, suite):
+        """The key length CryptoLib expects for a cipher ("ecs") or MAC ("acs")
+        suite code, from CryptoLib's own table; None when it does not say."""
+        length = (self.lib.eg_ecs_keylen if kind == "ecs" else self.lib.eg_acs_keylen)(suite)
+        return length if length > 0 else None
 
     def close(self):
         """Crypto_Shutdown: free CryptoLib's state (a new engine may follow)."""

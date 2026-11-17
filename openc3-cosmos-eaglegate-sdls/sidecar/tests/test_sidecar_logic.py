@@ -1,6 +1,8 @@
 """The sidecar's own logic, with a stand-in for CryptoLib (runs anywhere).
 The real CryptoLib is exercised by test_cryptolib.py in the test image."""
 import json
+import os
+import tempfile
 import unittest
 
 from tests import _paths  # noqa: F401  (sys.path)
@@ -8,6 +10,7 @@ from tests import _paths  # noqa: F401  (sys.path)
 import eaglegate_sdls_sidecar_protocol as wire
 from eaglegate_sidecar import config as cfg
 from eaglegate_sidecar import keys as key_info
+from eaglegate_sidecar import keystore
 from eaglegate_sidecar.server import Sidecar, channel_keys_from_env
 
 KEY = bytes(range(32))
@@ -256,8 +259,12 @@ class ProtocolTest(unittest.TestCase):
         self.assertEqual(sa["mask"]["data_field"], False)
         self.assertNotIn("encryption", sa["keys"])
         self.assertEqual(info["security_associations"]["6"]["keys"]["encryption"]["id"], 9)
-        self.assertNotIn("key", json.dumps(info).lower().replace("keys", "").replace("key_source", "")
+        text = json.dumps(info).lower()
+        self.assertNotIn("key", text.replace("keys", "").replace("key_source", "").replace("key_file", "")
+                         .replace("key_problems", "").replace("key_reloads", "")
                          .replace("test_key", "").replace("known_test_", ""))
+        for key_id in (9, 130):  # no key bytes, in any form
+            self.assertNotIn(bytes(FakeEngine(None).key(key_id)[0]).hex(), text)
 
 
 class ChannelKeyTest(unittest.TestCase):
@@ -273,6 +280,168 @@ class ChannelKeyTest(unittest.TestCase):
         config = nos3_config()
         with self.assertRaises(ValueError):
             Sidecar(config, FakeEngine(config), {})
+
+# ---- custom keys (key_source "custom", decision D12) -------------------------------
+
+class CustomFakeEngine(FakeEngine):
+    """FakeEngine with a custom key ring, like CryptoLibEngine(key_source custom)."""
+
+    custom = True
+
+    def __init__(self, sidecar_config, keys=()):
+        super().__init__(sidecar_config)
+        self.load_problems = []
+        self.ring = {}
+        self.load_keys(list(keys))
+
+    def load_keys(self, keys):
+        self.ring = {key_id: (bytes(value), state) for key_id, value, state in keys}
+        return []
+
+    def key(self, key_id):
+        if key_id not in self.ring:
+            return bytearray(), "preactive"
+        value, state = self.ring[key_id]
+        return bytearray(value), {0: "preactive", 1: "active", 2: "deactivated"}.get(state, "corrupted")
+
+    def expected_key_length(self, kind, suite):
+        return 32  # AES-256 and HMAC-SHA256, as CryptoLib's own table says
+
+
+def nos3_raw():
+    with open(_paths.NOS3_CONFIG) as handle:
+        return json.load(handle)
+
+
+def custom_config():
+    raw = nos3_raw()
+    raw["key_source"] = "custom"
+    return cfg.parse(raw)
+
+
+def write_keys(directory, entries):
+    path = os.path.join(directory, "keys.json")
+    with open(path, "w") as handle:
+        json.dump({"keys": entries}, handle)
+    return path
+
+
+class KeyFileTest(unittest.TestCase):
+    def test_a_good_file(self):
+        keys, problems = keystore.parse_keys({"keys": [
+            {"id": 130, "hex": "11" * 32, "state": "active"},
+            {"id": 131, "hex": "22" * 32, "state": "preactive"},
+            {"id": 9, "hex": "33" * 32}]})
+        self.assertEqual(problems, [])
+        self.assertEqual([(k, bytes(v), s) for k, v, s in keys],
+                         [(130, b"\x11" * 32, 1), (131, b"\x22" * 32, 0), (9, b"\x33" * 32, 1)])
+        self.assertTrue(all(isinstance(v, bytearray) for _, v, _ in keys))  # can be wiped
+        keystore.wipe(keys)
+        self.assertEqual(bytes(keys[0][1]), bytes(32))
+
+    def test_bad_entries_are_skipped_and_reported_without_key_bytes(self):
+        secret = "ab" * 32
+        keys, problems = keystore.parse_keys({"keys": [
+            {"id": 300, "hex": secret}, {"id": 1, "hex": "zz"}, {"id": 2, "hex": secret, "state": "on"},
+            {"id": 3, "hex": secret}, {"id": 3, "hex": secret}, "x", {"id": 4, "hex": "aa" * 513},
+            {"id": True, "hex": secret}], "extra": 1})
+        self.assertEqual([k for k, _, _ in keys], [3])
+        text = " ".join(problems)
+        for expected in ("id must be a key id", "hex must be the key bytes", "state must be one of",
+                         "listed twice", "is not an object", "longer than CryptoLib's 512", "unknown top-level"):
+            self.assertIn(expected, text)
+        self.assertNotIn(secret, text)
+
+    def test_a_file_that_cannot_be_used(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with self.assertRaisesRegex(keystore.KeyFileError, "cannot read"):
+                keystore.read_key_file(os.path.join(directory, "missing.json"))
+            path = os.path.join(directory, "bad.json")
+            with open(path, "w") as handle:
+                handle.write('{"keys": [{"id": 1, "hex": "' + "ab" * 32 + '"')
+            with self.assertRaises(keystore.KeyFileError) as caught:
+                keystore.read_key_file(path)
+            self.assertNotIn("ab" * 32, str(caught.exception))  # never quotes the file
+            with open(path, "w") as handle:
+                json.dump({"no_keys": []}, handle)
+            with self.assertRaisesRegex(keystore.KeyFileError, '"keys" list'):
+                keystore.read_key_file(path)
+
+    def test_the_path_comes_from_the_environment(self):
+        self.assertEqual(keystore.key_file_path({}), "/run/secrets/eaglegate_sdls_keys")
+        self.assertEqual(keystore.key_file_path({"EAGLEGATE_SDLS_KEY_FILE": "/k"}), "/k")
+
+
+class CustomKeysTest(unittest.TestCase):
+    def sidecar(self, directory, entries, known=None):
+        path = write_keys(directory, entries)
+        keys, problems = keystore.read_key_file(path)
+        config = custom_config()
+        return Sidecar(config, CustomFakeEngine(config, keys), {"default": KEY}, known, path, problems), path
+
+    def test_problems_are_reported_by_spi_and_key_id(self):
+        import hashlib
+
+        with tempfile.TemporaryDirectory() as directory:
+            sidecar, _ = self.sidecar(directory, [
+                {"id": 130, "hex": "13" * 32, "state": "deactivated"},
+                {"id": 9, "hex": "44" * 16}], known=frozenset({hashlib.sha256(b"\x13" * 32).hexdigest()}))
+            problems = " | ".join(Client(sidecar).info()["key_problems"])
+        self.assertIn("SPI 7: its authentication key 130 is deactivated, not active", problems)
+        self.assertIn("SPI 7: its authentication key 130 is one of CryptoLib's published TEST keys", problems)
+        self.assertIn("SPI 6: its encryption key 9 is 16 bytes; CryptoLib expects 32 for AES256_GCM", problems)
+
+    def test_a_missing_key_is_a_problem(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sidecar, _ = self.sidecar(directory, [{"id": 130, "hex": "55" * 32}])
+            info = Client(sidecar).info()
+        self.assertEqual(info["key_problems"], ["SPI 6: its encryption key 9 is not loaded"])
+        self.assertEqual(info["key_source"], "custom")
+
+    def test_reload_replaces_the_keys_and_new_fingerprints_follow(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sidecar, _ = self.sidecar(directory, [{"id": 130, "hex": "55" * 32}, {"id": 9, "hex": "66" * 32}])
+            client = Client(sidecar)
+            before = client.info()["security_associations"]["7"]["keys"]["authentication"]["fingerprint"]
+            write_keys(directory, [{"id": 130, "hex": "77" * 32}, {"id": 9, "hex": "66" * 32}])
+            answer = client.call(wire.reload_keys_request(2))
+            ok, loaded, problems, _ = wire.parse_reload_keys_response(answer)
+            self.assertEqual((ok, loaded, problems), (True, 2, []))
+            client.next_id = 3
+            after = client.info()["security_associations"]["7"]["keys"]["authentication"]
+            self.assertNotEqual(after["fingerprint"], before)
+            self.assertEqual(client.info()["key_reloads"], 1)
+
+    def test_an_unusable_file_keeps_the_current_keys(self):
+        with tempfile.TemporaryDirectory() as directory:
+            sidecar, path = self.sidecar(directory, [{"id": 130, "hex": "55" * 32}, {"id": 9, "hex": "66" * 32}])
+            with open(path, "w") as handle:
+                handle.write("{ not json")
+            client = Client(sidecar)
+            ok, _, _, detail = wire.parse_reload_keys_response(client.call(wire.reload_keys_request(1)))
+            self.assertFalse(ok)
+            self.assertIn("keys unchanged", detail)
+            self.assertEqual(sidecar.engine.ring[130][0], b"\x55" * 32)
+
+    def test_internal_keys_cannot_be_reloaded(self):
+        client = Client(make_sidecar())
+        ok, _, _, detail = wire.parse_reload_keys_response(client.call(wire.reload_keys_request(1)))
+        self.assertFalse(ok)
+        self.assertIn('key_source is "internal"', detail)
+
+    def test_reload_needs_an_authenticated_session(self):
+        sidecar = make_sidecar()
+        with self.assertRaises(wire.SidecarProtocolError):
+            sidecar.handle(wire.reload_keys_request(1), sidecar.new_session())
+        client = Client(sidecar)
+        forged = wire.sign(OTHER_KEY, client.session, "request", wire.reload_keys_request(1))
+        with self.assertRaises(wire.SidecarProtocolError):
+            sidecar.handle(forged, client.state)
+
+    def test_the_config_accepts_custom(self):
+        self.assertEqual(custom_config().key_source, "custom")
+        with self.assertRaises(cfg.ConfigError):
+            cfg.parse({**nos3_raw(), "key_source": "kmc"})
 
 
 if __name__ == "__main__":

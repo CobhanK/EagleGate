@@ -282,7 +282,9 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
 - **Still enforced:** the structural header check and SDLS's own checks (SDLS has its own `mode`).
 - **Typical rollout:** apply the new rule with `"monitor": true`. Watch the Quarantine tab, the widget or the "WOULD DENY" entries. Then switch it off.
 
-## 6c. Audit log, retention and export (decisions C13, C14)
+## 6c. Audit log, retention and export (decisions C13, C14, C15)
+
+The **Audit log** tab (admins only) lists the audit stream newest first, with filters for action, outcome and text. Each entry expands to show every field. Export downloads it as JSON, and the export itself is recorded.
 
 - **Audit log:** `…QUARANTINE_AUDIT__<iface>` records:
   - every rules change: `RELOAD_RULES`, or `LOAD_RULES` at start-up or reconnect, with the old and new version and sha256, a summary of what changed, and the reason given on the page;

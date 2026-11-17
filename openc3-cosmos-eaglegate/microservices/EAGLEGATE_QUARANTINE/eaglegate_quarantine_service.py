@@ -9,6 +9,8 @@ Authorization header every COSMOS API call carries.
   GET  /eaglegate-quarantine/entries?interface=&stream=&limit=&stage=&rule_id=&apid=&review=&search=&before=
   GET  /eaglegate-quarantine/entry?interface=&stream=&id=
   GET  /eaglegate-quarantine/export?interface=&stream=&format=json|pcap&limit=&<the list filters>
+  GET  /eaglegate-quarantine/audit?interface=&limit=&action=&ok=&search=&before=
+  GET  /eaglegate-quarantine/audit/export?interface=&limit=&<the audit filters>   (JSON download)
   POST /eaglegate-quarantine/review   {"interface", "stream", "ids", "state", "note", "requested_by"}
 
 An export is a file download (JSON with every field and the bytes as hex, or
@@ -164,7 +166,8 @@ class ReviewApp:
         params = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query, keep_blank_values=True).items()}
         if path == "/health" and method == "GET":
             return {"ok": True}
-        routes = {("GET", "/entries"), ("GET", "/entry"), ("GET", "/export"), ("POST", "/review")}
+        routes = {("GET", "/entries"), ("GET", "/entry"), ("GET", "/export"), ("GET", "/audit"),
+                  ("GET", "/audit/export"), ("POST", "/review")}
         if (method, path) not in routes:
             if any(p == path for _, p in routes):
                 raise HttpError(405, f"{method} is not allowed here")
@@ -187,6 +190,11 @@ class ReviewApp:
             return {"interface": interface, **result}
         if path == "/export":
             return self._export(store, k, scope, interface, params, user)
+        if path == "/audit":
+            result = review.list_audit(store, k, review.audit_query(params))
+            return {"interface": interface, "actions": review.audit_actions(store, k), **result}
+        if path == "/audit/export":
+            return self._export_audit(store, k, scope, interface, params, user)
         stream = review.stream_param(params.get("stream"))
         entry_id = review.entry_id_param(params.get("id", ""))
         entry = review.get_entry(store, k, stream, entry_id)
@@ -211,6 +219,22 @@ class ReviewApp:
                 "note": "packet bytes are hex; text fields are cleaned (control and invisible "
                         "characters escaped). Handle this file as sensitive."}
         return Download(review.export_json(entries, meta), "application/json", filename)
+
+    @staticmethod
+    def _export_audit(store, k, scope, interface, params, user):
+        """The audit log (matching entries, up to MAX_EXPORT) as a JSON download.
+        Exporting it is itself recorded."""
+        query = review.audit_query(params, max_limit=review.MAX_EXPORT)
+        result = review.list_audit(store, k, query, max_scan=max(review.MAX_SCAN, store.xlen(k["audit"])))
+        entries = result["entries"]
+        audit_id = review.audit_export(store, k, interface, "audit", "json", len(entries), query, user)
+        meta = {"exported_at": review.utc_now(), "exported_by": user, "scope": scope, "interface": interface,
+                "stream": "audit", "audit_id": audit_id, "complete": result["next_before"] is None,
+                "filters": {key: value for key, value in query.items() if value not in ("", None)},
+                "note": "text fields are cleaned (control and invisible characters escaped)"}
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        return Download(review.export_json(entries, meta, kind="eaglegate-audit-export"), "application/json",
+                        f"eaglegate-{interface}-audit-{stamp}.json")
 
     @staticmethod
     def _json_body(headers, body):

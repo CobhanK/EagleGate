@@ -36,13 +36,15 @@ class CryptoLibCase(unittest.TestCase):
     """One CryptoLib per process: each class sets it up and shuts it down."""
 
     CONFIG = None  # dict; None = config/nos3.json
+    CUSTOM_KEYS = None  # [(id, bytes, state)] for key_source "custom"
 
     @classmethod
     def setUpClass(cls):
         from eaglegate_sidecar.engine import CryptoLibEngine
 
         cls.config = cfg.parse(cls.CONFIG) if cls.CONFIG else cfg.load(_paths.NOS3_CONFIG)
-        cls.engine = CryptoLibEngine(cls.config)
+        keys = [(k, bytearray(v), s) for k, v, s in (cls.CUSTOM_KEYS or [])]
+        cls.engine = CryptoLibEngine(cls.config, custom_keys=keys)
         cls.apply_lib = ctypes.CDLL(os.path.join(LIB_DIR, "libeg_test_apply.so"))
         cls.apply_lib.eg_test_tm_apply.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_int]
         cls.apply_lib.eg_test_tm_apply.restype = ctypes.c_int
@@ -199,6 +201,77 @@ class FullMaskTest(CryptoLibCase):
         a, _ = self.protect(7, b"one ")
         b, _ = self.protect(7, b"two ")
         self.assertNotEqual(a[-16:], b[-16:])
+
+
+AUTH_KEY = bytes(range(100, 132))     # not one of CryptoLib's test keys
+ENC_KEY = bytes(range(200, 232))
+CUSTOM_SAS = {
+    "6": {"vcid": 4, "service": "enc", "ecs": "AES256_GCM", "ekid": 9, "iv_len": 12, "abm": "zeros"},
+    "7": {"vcid": 5, "service": "auth", "acs": "HMAC_SHA256", "akid": 130, "sn_len": 2, "mac_len": 16,
+          "abm": "ones"}}
+
+
+class CustomKeysTest(CryptoLibCase):
+    """key_source "custom" (decision D12): CryptoLib's custom key interface,
+    filled by the sidecar. CryptoLib protects (flight side) and checks with
+    whatever the ring holds, so every result is CryptoLib's own."""
+
+    CONFIG = {"tm": {"scid": 3, "frame_length": LENGTH}, "key_source": "custom",
+              "security_associations": CUSTOM_SAS}
+    CUSTOM_KEYS = [(130, AUTH_KEY, 1), (9, ENC_KEY, 1)]
+
+    def setUp(self):
+        self.engine.load_keys([(130, bytearray(AUTH_KEY), 1), (9, bytearray(ENC_KEY), 1)])
+
+    def test_custom_keys_verify_and_decrypt(self):
+        frame, plain = self.protect(7, b"real key ")
+        self.assertEqual(self.engine.process(frame), (0, 7, plain))
+        frame, _ = self.protect(6, b"secret ")
+        status, _, data = self.engine.process(frame)
+        self.assertEqual((status, data), (0, self.plaintext(6, b"secret ")))
+
+    def test_the_ring_holds_our_keys_and_no_test_keys(self):
+        known = key_info.load_known()
+        report = key_info.key_report(self.engine, 130, known)
+        self.assertEqual((report["fingerprint"], report["state"], report["test_key"]),
+                         (hashlib.sha256(AUTH_KEY).hexdigest(), "active", False))
+        for key_id in (0, 1, 128, 131):  # ids where CryptoLib's internal ring has test keys
+            self.assertEqual(key_info.key_report(self.engine, key_id, known)["length"], 0)
+
+    def test_cryptolib_refuses_a_key_that_is_not_active(self):
+        frame, _ = self.protect(7, b"before ")
+        self.engine.load_keys([(130, bytearray(AUTH_KEY), 2), (9, bytearray(ENC_KEY), 1)])  # deactivated
+        status, _, data = self.engine.process(frame)
+        self.assertNotEqual(status, 0)
+        self.assertIsNone(data)
+
+    def test_after_a_reload_frames_need_the_new_key(self):
+        old_frame, _ = self.protect(7, b"old key ")
+        self.engine.load_keys([(130, bytearray(bytes(range(50, 82))), 1), (9, bytearray(ENC_KEY), 1)])
+        self.assertNotEqual(self.engine.process(old_frame)[0], 0)
+        new_frame, plain = self.protect(7, b"new key ")
+        self.assertEqual(self.engine.process(new_frame), (0, 7, plain))
+
+    def test_cryptolib_says_which_key_lengths_its_suites_need(self):
+        self.assertEqual(self.engine.expected_key_length("ecs", cfg.ECS["AES256_GCM"]), 32)
+        self.assertEqual(self.engine.expected_key_length("acs", cfg.ACS["HMAC_SHA256"]), 32)
+        self.assertEqual(self.engine.expected_key_length("acs", cfg.ACS["HMAC_SHA512"]), 64)
+
+    def test_the_ring_refuses_bad_entries(self):
+        problems = self.engine.load_keys([(130, bytearray(AUTH_KEY), 9)])
+        self.assertTrue(problems and "key 130" in problems[0])
+
+    def test_the_sidecar_reports_problems_from_cryptolib(self):
+        from eaglegate_sidecar import keystore
+        from eaglegate_sidecar.server import Sidecar
+
+        self.engine.load_keys([(130, bytearray(AUTH_KEY), 0), (9, bytearray(ENC_KEY[:16]), 1)])
+        sidecar = Sidecar(self.config, self.engine, {"default": bytes(32)}, key_info.load_known(), "/k", [])
+        problems = " | ".join(sidecar.info["key_problems"])
+        self.assertIn("key 130 is preactive, not active", problems)
+        self.assertIn("key 9 is 16 bytes; CryptoLib expects 32", problems)
+        self.assertNotIn(AUTH_KEY.hex(), json.dumps(sidecar.info))
+        self.assertIsNotNone(keystore)
 
 
 @unittest.skipUnless(HAVE_CRYPTOLIB, "needs the sidecar test image (CryptoLib)")

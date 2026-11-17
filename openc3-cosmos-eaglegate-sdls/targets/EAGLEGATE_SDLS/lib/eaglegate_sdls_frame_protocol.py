@@ -81,6 +81,18 @@ RESET_REPLAY = {
     },
 }
 
+RELOAD_KEYS = {
+    "name": "reload_keys",
+    "command": "RELOAD_KEYS",
+    "title": "Reload SDLS keys",
+    "help": "The sidecar re-reads its key secret (key_source custom) into CryptoLib's key ring, e.g. after a "
+            "rekey: change the secret (a new key as active, the old one deactivated), then reload. Frames are "
+            "then checked with the new keys; a new key starts a new anti-replay baseline.",
+    "confirm": "Frames protected with a key that is no longer active are refused from now on. If the key file "
+               "cannot be read at all, the sidecar keeps its current keys.",
+    "params": {},
+}
+
 PANELS = (
     {"title": "Link", "kind": "values", "path": "overview",
      "items": {"mode": "Mode", "crypto_backend": "Crypto backend", "in_lock": "Frame sync",
@@ -99,7 +111,9 @@ PANELS = (
              "there; EagleGate sees only their fingerprints.",
      "items": {"backend": "Backend", "connected": "Connected", "cryptolib": "CryptoLib", "sidecar": "Sidecar",
                "key_source": "Key source", "sa_match": "SA table matches the rules", "mismatch": "Differences",
-               "test_key_spis": "SPIs on TEST KEYS", "latency_ms": "Latency (ms)", "last_error": "Last error"}},
+               "test_key_spis": "SPIs on TEST KEYS", "key_problems": "Key problems", "key_reloads": "Key reloads",
+               "latency_ms": "Latency (ms)", "last_error": "Last error"},
+     "actions": [{"action": "reload_keys", "title": "Reload keys"}]},
     {"title": "Keys", "kind": "table", "path": "keys", "key_title": "SPI",
      "help": "Which key protects each SA (ids and SHA-256 fingerprints from the sidecar) and whether it is due "
              "for replacement: counter near the end of its range (rekey_warn_percent), past not_after, or "
@@ -134,7 +148,7 @@ EXTENSION = Extension(
     version=SDLS_VERSION,
     details_key="sdls",
     panels=PANELS,
-    actions=(RESET_REPLAY,),
+    actions=(RESET_REPLAY, RELOAD_KEYS),
 )
 
 
@@ -387,11 +401,36 @@ class EaglegateSdlsFrameProtocol(Protocol):
     # ---- admin command -------------------------------------------------------
 
     def protocol_cmd(self, cmd_name, *cmd_args):
-        if str(cmd_name).upper() != "RESET_REPLAY":
+        name = str(cmd_name).upper()
+        if name == "RESET_REPLAY":
+            self.reset_replay(cmd_args[0] if cmd_args else None)
+        elif name == "RELOAD_KEYS":
+            self.reload_keys(cmd_args[0] if cmd_args else None)
+        else:
             return False
-        self.reset_replay(cmd_args[0] if cmd_args else None)
         self.status_due = True
         return True
+
+    def reload_keys(self, request_sha256):
+        """RELOAD_KEYS: an admin asks the sidecar to re-read its key secret
+        (decision D12). Admin-only like RESET_REPLAY, and audited."""
+        firewall = self._firewall()
+        if firewall is None:
+            return False
+        sha = None if request_sha256 in (None, "", "None") else str(request_sha256)
+        try:
+            request = firewall.admin_request("reload_keys", sha)
+        except RequestError as error:
+            return firewall.record_admin_action("RELOAD_KEYS", False, str(error), request_sha256=sha or "")
+        if request.params:
+            return firewall.record_admin_action("RELOAD_KEYS", False, "reload_keys takes no parameters", request)
+        backend = self.backend
+        if backend is None or not hasattr(backend, "reload_keys"):
+            return firewall.record_admin_action("RELOAD_KEYS", False, "link.crypto.backend is not sidecar: there "
+                                                "are no keys to reload", request)
+        ok, detail, problems = backend.reload_keys()
+        detail = f"sidecar: {detail}" + (f"; problems: {'; '.join(problems)}" if problems else "")
+        return firewall.record_admin_action("RELOAD_KEYS", ok, detail[:1000], request, problems=problems)
 
     def reset_replay(self, request_sha256):
         firewall = self._firewall()

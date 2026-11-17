@@ -82,6 +82,44 @@ The CryptoLib-only fields are:
 
 **Fix on the spacecraft:** give the SA a mask over the header and data, and set `"abm": "ones"` here.
 
+## Real keys (`key_source: custom`, decision D12)
+
+`"key_source": "internal"` (the default) uses CryptoLib's built-in key ring. That ring holds CryptoLib's **published test keys**: fine for NOS3, never for operations.
+
+`"key_source": "custom"` uses CryptoLib's own custom key interface:
+- **The key ring:** `shim/key_custom/eg_key_interface_custom.c`, built into CryptoLib with `-DKEY_CUSTOM=ON`. It starts **empty** and is filled from one Docker secret.
+- **CryptoLib still does all the cryptography.** It also refuses any key that isn't active.
+
+The secret is `keys.json` in the folder mounted at `/run/secrets/eaglegate_sdls/` (or set `EAGLEGATE_SDLS_KEY_FILE`):
+
+```json
+{"keys": [
+  {"id": 130, "hex": "<64 hex digits: 32 bytes>", "state": "active"},
+  {"id": 131, "hex": "<64 hex digits>",           "state": "preactive"},
+  {"id": 9,   "hex": "<64 hex digits>",           "state": "active"}
+]}
+```
+
+- **Fields:**
+  - `id` is the CryptoLib key id an SA's `ekid`/`akid` names (0–255);
+  - `state` is `preactive`, `active`, `deactivated`, `destroyed` or `corrupted`. Only `active` keys are used, by CryptoLib's own check.
+- **With `eagle.sh`:** put the file in `sidecar/secrets/sdls/keys.json` (git-ignored, mode 0600 or 0644 for the container user) and set `key_source` to `custom` in your `SIDECAR_CONFIG`. `./eagle.sh run-sidecar` then mounts the **folder** read-only. A folder, not the single file, because a bind-mounted file keeps the old version when an editor replaces it, so a reload would not see the change.
+- **Start and report:** at start the sidecar loads every valid entry and reports, by SPI and key id (never key bytes), in its log, in `info` and in the EagleGate Link status tab ("Key problems"):
+  - entries it skipped;
+  - keys an SA needs that are missing or not active;
+  - keys whose length differs from what CryptoLib's own table expects for the SA's suite;
+  - CryptoLib test keys.
+
+  A file that cannot be read starts it with no keys: every protected frame then fails, and EagleGate follows `link.crypto.on_unavailable`.
+- **Rotating keys without a restart:**
+  1. edit `keys.json` (for example, the new key `active`, the old one `deactivated`);
+  2. on the EagleGate page, choose Link status → Crypto backend → **Reload keys**.
+
+  It's an admin request, written to the audit log. The plugin sends an authenticated `reload_keys` request over its own session. The sidecar replaces the whole ring under the engine lock, so no frame is processed with a half-loaded ring. If the file can't be read at all, the current keys stay.
+
+  New keys have new fingerprints, so EagleGate starts new anti-replay baselines (key epochs).
+- **Key bytes in memory:** they pass through Python as bytearrays, wiped once CryptoLib has its copy. Python cannot wipe the string the JSON parser made, and the secret file is the long-lived copy anyway. CryptoLib's ring is wiped with `explicit_bzero` on shutdown and on every reload.
+
 ## Tests
 
 - **Without Docker:** `pytest` from the SDLS plugin folder (`../.venv/bin/python -m pytest`) runs the plugin's tests and these. It the protocol, configuration and mask logic against a stand-in for CryptoLib. The real-CryptoLib tests are skipped.
@@ -92,7 +130,13 @@ The CryptoLib-only fields are:
   - the same frame verifies twice (the checks are pure);
   - an SPI on the wrong VC is refused;
   - test keys are recognized;
-  - about 400 damaged and random frames are processed.
+  - about 400 damaged and random frames are processed;
+  - custom keys:
+    - they verify and decrypt;
+    - the ring holds no test keys;
+    - a non-active key is refused;
+    - after a reload, frames need the new key;
+    - CryptoLib's expected key lengths are reported.
 
   The damaged-frame test was also run under valgrind: CryptoLib's process path showed no memory errors.
 - **The EagleGate side:** `../tests/test_sidecar_backend.py` runs `SidecarCrypto` against this server's code over TCP. It covers:

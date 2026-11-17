@@ -23,16 +23,19 @@ RUN apt-get update \
 WORKDIR /src
 RUN git clone --depth 1 --branch "${CRYPTOLIB_TAG}" https://github.com/nasa/CryptoLib.git cryptolib \
  && test "$(git -C cryptolib rev-parse HEAD)" = "${CRYPTOLIB_COMMIT}"
-# Internal SA store and key ring, libgcrypt, monitoring and control off, no
-# SA file (nothing is ever saved: the sidecar's checks are pure). No build type:
-# upstream's own flags (-Wall -Wextra -Werror -g -O0), the configuration it tests
+# Internal SA store, libgcrypt, monitoring and control off, no SA file (nothing
+# is ever saved: the sidecar's checks are pure). Two key rings, chosen at run
+# time by key_source: CryptoLib's internal one (its published test keys) and
+# CryptoLib's custom key interface, implemented in shim/key_custom (an empty
+# ring the sidecar fills from its Docker secret). No build type: upstream's own
+# flags (-Wall -Wextra -Werror -g -O0), the configuration it tests
+COPY sidecar/shim /src/shim
 RUN cmake -S cryptolib -B cryptolib/build \
-      -DCRYPTO_LIBGCRYPT=ON -DKEY_INTERNAL=ON -DSA_INTERNAL=ON -DMC_DISABLED=ON \
-      -DSUPPORT=OFF -DTEST=OFF -DSA_FILE=OFF -DDEBUG=OFF \
+      -DCRYPTO_LIBGCRYPT=ON -DKEY_INTERNAL=ON -DKEY_CUSTOM=ON -DKEY_CUSTOM_PATH=/src/shim/key_custom \
+      -DSA_INTERNAL=ON -DMC_DISABLED=ON -DSUPPORT=OFF -DTEST=OFF -DSA_FILE=OFF -DDEBUG=OFF \
  && cmake --build cryptolib/build -j"$(nproc)" \
  && mkdir -p /opt/eaglegate/lib \
  && cp "$(find cryptolib/build -name 'libcryptolib.so*' -type f | head -1)" /opt/eaglegate/lib/libcryptolib.so
-COPY sidecar/shim /src/shim
 RUN gcc -O2 -fPIC -shared -Wall -Wextra -Werror -o /opt/eaglegate/lib/libeg_cryptolib.so shim/eg_cryptolib.c \
       -Icryptolib/include -L/opt/eaglegate/lib -lcryptolib -Wl,-rpath,'$ORIGIN' \
  && gcc -O2 -fPIC -shared -Wall -Wextra -Werror -o /opt/eaglegate/lib/libeg_test_apply.so shim/eg_test_apply.c \

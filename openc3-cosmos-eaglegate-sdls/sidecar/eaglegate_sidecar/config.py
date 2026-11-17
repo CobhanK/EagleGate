@@ -5,7 +5,7 @@ the way the flight CryptoLib produced them).
   {
     "tm": {"tfvn": 0, "scid": 3, "frame_length": 1786, "has_fecf": false,
            "has_ocf": false, "secondary_header_length": 0},
-    "key_source": "internal",
+    "key_source": "internal",           # or "custom": real keys from a Docker secret
     "security_associations": {
       "5": {"vcid": 1, "service": "clear", "iv_len": 12},
       "7": {"vcid": 5, "service": "auth", "acs": "HMAC_SHA256", "akid": 130,
@@ -37,7 +37,9 @@ ALLOWED = {
     "enc": ({"AES256_GCM", "AES256_CBC"}, {"NONE"}),
     "authenc": ({"AES256_GCM"}, {"NONE"}),
 }
-KEY_SOURCES = ("internal",)  # KEY_CUSTOM (keys from a docker secret) is planned
+# internal: CryptoLib's built-in ring (its published TEST keys, for labs).
+# custom: CryptoLib's custom key interface, filled from a Docker secret (keystore.py)
+KEY_SOURCES = ("internal", "custom")
 PRIMARY_HEADER = 6
 SPI_LEN = 2
 MAX_FRAME = 1786             # CryptoLib's ABM_SIZE / TM_FRAME_DATA_SIZE

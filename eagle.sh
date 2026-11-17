@@ -19,6 +19,10 @@ SIDECAR_NAME="${SIDECAR_NAME:-eaglegate-sdls-sidecar}"
 SIDECAR_NETWORK="${SIDECAR_NETWORK:-cosmos_default}"   # COSMOS's docker network
 SIDECAR_KEY_FILE="${SIDECAR_KEY_FILE:-$SIDECAR_DIR/secrets/channel.key}"
 SIDECAR_CONFIG="${SIDECAR_CONFIG:-$SIDECAR_DIR/config/nos3.json}"
+# Real SDLS keys (sidecar key_source "custom"): a folder holding keys.json, mounted
+# read-only as a FOLDER so an edited key file is seen by RELOAD_KEYS (a bind mount
+# of a single file keeps the old file when an editor replaces it). Never committed.
+SDLS_KEYS_DIR="${SDLS_KEYS_DIR:-$SIDECAR_DIR/secrets/sdls}"
 
 # echo $SCRIPT_DIR
 # echo $SRC
@@ -130,6 +134,12 @@ case "$COMMAND" in
             exit 1
         fi
         docker rm -f "$SIDECAR_NAME" >/dev/null 2>&1 || true
+        SDLS_KEYS_MOUNT=()
+        if [[ -f "$SDLS_KEYS_DIR/keys.json" ]]; then
+            SDLS_KEYS_MOUNT=(-v "$SDLS_KEYS_DIR:/run/secrets/eaglegate_sdls:ro"
+                             -e EAGLEGATE_SDLS_KEY_FILE=/run/secrets/eaglegate_sdls/keys.json)
+            echo "Mounting the SDLS keys in $SDLS_KEYS_DIR (used when the config has key_source custom)"
+        fi
         # Read-only root, no capabilities, scratch dir in tmpfs (CryptoLib writes
         # sa_save_file.bin there at start), on COSMOS's network only (no port published)
         docker run -d --name "$SIDECAR_NAME" --network "$SIDECAR_NETWORK" --restart unless-stopped \
@@ -137,6 +147,7 @@ case "$COMMAND" in
             --cap-drop ALL --security-opt no-new-privileges --pids-limit 64 --memory 256m \
             -v "$SIDECAR_KEY_FILE:/run/secrets/eaglegate_sidecar_key:ro" \
             -v "$SIDECAR_CONFIG:/etc/eaglegate-sidecar/sidecar.json:ro" \
+            ${SDLS_KEYS_MOUNT[@]+"${SDLS_KEYS_MOUNT[@]}"} \
             "$SIDECAR_IMAGE"
         echo "Started $SIDECAR_NAME on network $SIDECAR_NETWORK (config $SIDECAR_CONFIG); logs: docker logs $SIDECAR_NAME"
         ;;
@@ -178,7 +189,8 @@ case "$COMMAND" in
         echo "test-sidecar   : runs the sidecar's tests against the real CryptoLib"
         echo "sidecar-key    : creates the EagleGate <-> sidecar channel key ($SIDECAR_KEY_FILE)"
         echo "run-sidecar|stop-sidecar : starts or stops the sidecar on $SIDECAR_NETWORK"
-        echo "                 (SIDECAR_CONFIG=... picks the SA configuration, default config/nos3.json)"
+        echo "                 (SIDECAR_CONFIG=... picks the SA configuration, default config/nos3.json;"
+        echo "                  real SDLS keys: key_source custom in it, keys in $SDLS_KEYS_DIR/keys.json)"
     ;;
     *)
         echo "Usage: $0 {build-core|build-sdls|build-core-sdls|build-all [-v 1.x.x]|clean|run|stop|build-sidecar|test-sidecar|sidecar-key|run-sidecar|stop-sidecar|help}" >&2

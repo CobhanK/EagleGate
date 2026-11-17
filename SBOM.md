@@ -85,13 +85,13 @@ The plugin's sidecar client (`eaglegate_sdls_sidecar_backend.py`) and wire proto
 
 | Component | Version | License | Why |
 |---|---|---|---|
-| NASA CryptoLib | v1.5.1, commit `5b98c8b2561b22822a9d4e26c959677ed93c815a` (checked at build time) | NOSA 1.3 | All SDLS cryptography. Built from source with `KEY_INTERNAL`, `SA_INTERNAL`, `MC_DISABLED` and `CRYPTO_LIBGCRYPT`, using upstream's flags |
+| NASA CryptoLib | v1.5.1, commit `5b98c8b2561b22822a9d4e26c959677ed93c815a` (checked at build time) | NOSA 1.3 | All SDLS cryptography. Built from source with `KEY_INTERNAL`, `KEY_CUSTOM` (our key ring, `shim/key_custom`), `SA_INTERNAL`, `MC_DISABLED` and `CRYPTO_LIBGCRYPT`, using upstream's flags |
 | libgcrypt | 1.10.1-3+deb12u1 (Debian bookworm) | LGPL-2.1+ | CryptoLib's crypto backend |
 | libgpg-error | 1.46-1 (Debian bookworm) | LGPL-2.1+ | Needed by libgcrypt |
 | Base image | `python:3.12-slim-bookworm@sha256:935c3c5b…03df` (Python 3.12.16, Debian 12.15) | PSF, Debian | Runtime. Pinned by digest |
 | Build stage only | build-essential, cmake, git (Debian bookworm) | various | Compile CryptoLib and the shim. Not in the runtime image |
 
-The sidecar's Python code uses only the standard library. Its tests use `unittest` in the image, and pytest in the dev venv.
+The sidecar's Python code uses only the standard library. Its tests use `unittest` in the image, and pytest in the dev venv. Real keys (`key_source: custom`, 2026-11-16) add no package: the key file is read with `json`, and the ring is CryptoLib's own custom key interface.
 
 **Version rule:** v1.5.2 (2026-11-04) is the latest release. It was skipped because it was less than two weeks old when pinned (DECISIONS.md D7). Re-check, then bump `CRYPTOLIB_TAG` and `CRYPTOLIB_COMMIT` in the Dockerfile.
 

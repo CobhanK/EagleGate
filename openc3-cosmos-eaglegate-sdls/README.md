@@ -207,6 +207,9 @@ With `"crypto": {"backend": "sidecar"}`, each frame of an authenticating or encr
   This shows in the Keys panel and in `REKEY_DUE`. It is a warning only: replacing keys is the mission's job.
 - **Counter reuse.** A verified frame that repeats an accepted counter under the same key, with different content, is rejected as `COUNTER REUSE` and logged as an error. The spacecraft reused an IV or sequence number, so the key must be replaced.
 - **Test keys.** Keys whose fingerprint matches one of CryptoLib's published test keys are flagged in red (`TEST_KEYS`). With `test_keys: deny`, frames under them are refused.
+- **Real keys and reloading** (decision D12). With the sidecar's `key_source: custom`, keys come from a Docker secret (format in `sidecar/README.md`).
+  - Problems are listed in the Crypto backend panel ("Key problems"): a missing or inactive key, a wrong length, or a test key.
+  - **Reload keys** on that panel (an admin request, audited) makes the sidecar re-read the secret without a restart.
 
 **Status:**
 - The Link status tab adds the **Crypto backend** and **Keys** panels.
@@ -228,7 +231,7 @@ From this folder, with the repository's dev venv: `../.venv/bin/python -m pytest
 ## Known limits
 
 - **Without the sidecar** (`backend: none`): MACs aren't verified (`auth_unverified`), encrypted SAs can't be read, and the anti-replay counter isn't authenticated.
-- **The sidecar uses CryptoLib's built-in test keys** (NOS3's). A key loader that reads a docker secret (`KEY_CUSTOM`) is planned.
+- **The sidecar defaults to CryptoLib's built-in test keys** (NOS3's). Use `key_source: custom` with a Docker secret for real keys (D12). KMC is not supported yet.
 - **The sidecar shares COSMOS's docker network.** Use an internal network to deny it outbound access.
 - **TM only:** no AOS or USLP. No SDLS-EP (key management) and no command (TC) side.
 - **Not tested inside a running COSMOS and NOS3 yet.** In particular, check the clear SA's IV field on real frames, and check the plugin install with `MAP_TLM_TARGET ... DISABLED`.

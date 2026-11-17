@@ -196,6 +196,16 @@ Each entry covers:
   - Every export writes an `EXPORT` audit entry: who, format, count and filters.
 - **Why:** principle P1 (a default plus an admin setting instead of constants), and incident response needs the evidence outside COSMOS, with a record of who took it.
 
+### C15. An admin-only audit log viewer (2026-11-16)
+- **Decision:**
+  - The review microservice serves `GET /eaglegate-quarantine/audit`: the audit stream, newest first, filtered by action, outcome and text, with paging. It also serves `/audit/export`: up to 10000 entries as JSON, itself recorded as an `EXPORT` entry.
+  - **Every entry:**
+    - its common fields (time, action, ok, detail, reason, requested by, the authenticated user), cleaned (C7);
+    - its other fields, with JSON ones such as rule `changes` parsed.
+  - The EagleGate page's **Audit log** tab shows it: action chips, who, reason, an expandable view of every field, and Export.
+  - Admins only, decided by the COSMOS server (C5).
+- **Why:** after C12–C14 the audit stream holds rule changes, releases, reviews, exports, spikes and key reloads. The page showed only the last 20 admin actions, kept in memory and lost on restart.
+
 ## Rules editor
 
 ### R1. Supports Core and Enterprise (2026-10-17)
@@ -274,7 +284,7 @@ Each entry covers:
 - **Decision:**
   - The built-in key ring holds CryptoLib's published test keys, the same ones NOS3 flight uses.
   - It is reported, and flagged, as TEST KEYS.
-  - Planned next: a `KEY_CUSTOM` loader that reads a docker secret; KMC later.
+  - Planned next: a `KEY_CUSTOM` loader that reads a docker secret; KMC later. Built: see D12.
 - **Why:** the NOS3 lab works today, and nobody can mistake the setup for a production one.
 
 ### D3. The sidecar channel is authenticated with HMAC-SHA256
@@ -341,6 +351,37 @@ TC and SDLS-EP are Phase 3.
   - Isolation, licensing and toolchain (D10) are unchanged.
   - The container and host name are still `eaglegate-sdls-sidecar`.
 - **Build:** the image's build context is the plugin folder. `sidecar/Dockerfile.dockerignore` lets in only what the image needs, and never `secrets/`.
+
+### D12. Real keys through CryptoLib's custom key interface (2026-11-16)
+The project owner's answers (2026-11-16): a Docker secret JSON file, key states honoured, start and report, hot reload.
+- **Decision:**
+  - **Sidecar key source:** `key_source` `internal` (CryptoLib's test ring, the default) or `custom`.
+  - **What `custom` is:** CryptoLib's own extension point, `-DKEY_CUSTOM=ON` with `KEY_CUSTOM_PATH=shim/key_custom`, chosen at run time with `KEY_TYPE_CUSTOM`. It is a key ring only: the same `crypto_key_t` array CryptoLib's internal interface uses, but starting empty. CryptoLib does every cryptographic operation, and itself refuses keys that aren't `KEY_ACTIVE`.
+  - **Key source:** one Docker secret, `{"keys": [{"id", "hex", "state"}]}`, mounted as a read-only folder. A file bind mount would keep a replaced file's old content and defeat a reload.
+  - **States:** preactive, active, deactivated, destroyed and corrupted are passed to CryptoLib as they are, so a next key can be staged.
+  - **Start and report:** the sidecar loads every valid entry and reports problems in its log, `info` and the Keys and Crypto backend panels, never with key bytes:
+    - skipped entries;
+    - an SA's key missing or not active;
+    - a length other than CryptoLib's own `Crypto_Get_ECS/ACS_Algo_Keylen` for the SA's suite;
+    - a CryptoLib test key (D6 fingerprints).
+
+    An unreadable file starts it with no keys, so frames fail and EagleGate follows `on_unavailable`.
+  - **Hot reload:** the wire protocol gains `reload_keys`, authenticated like every request (D3). EagleGate sends it only for the admin action `RELOAD_KEYS`: an admin request on the Crypto backend panel, written to the audit log. The plugin sends it on a session of its own, so the read thread's connection is untouched, then re-reads `info`.
+    - The sidecar replaces the whole ring under the engine lock: never a half-loaded ring.
+    - A file that cannot be read at all leaves the current keys; bad entries are skipped and reported.
+    - New fingerprints mean new key epochs, and so new anti-replay baselines.
+  - **Wiping:** key bytearrays in Python are wiped after loading, and CryptoLib's ring with `explicit_bzero` on reload and shutdown. Python's JSON string can't be wiped; the secret file is the long-lived copy.
+- **Instead of:**
+  - one file per key;
+  - all keys always active;
+  - refusing to start on bad keys;
+  - rotation by restart only.
+
+  These were the alternatives offered for each choice.
+- **Why:** real SDLS keys are needed for v1, kept within principle P3: CryptoLib's own interface, no new cryptography.
+- **Known limits:**
+  - Anyone holding the sidecar channel key can trigger a reload. That key is a COSMOS secret, and the reload only re-reads the secret file.
+  - Keys sit in plaintext inside the Docker secret, protected by the mount and file permissions. KMC, or an HSM, is the upgrade path.
 
 ### Key-management items adopted (2026-11-15)
 

@@ -409,9 +409,9 @@ def export_entries(store, k, query):
     return list_entries(store, k, query, build=detail, max_scan=max(MAX_SCAN, store.xlen(k[query["stream"]])))
 
 
-def export_json(entries, meta):
+def export_json(entries, meta, kind="eaglegate-quarantine-export"):
     """One JSON document: who exported what, then the entries (text already clean)."""
-    doc = {"format": "eaglegate-quarantine-export", "format_version": 1, **meta,
+    doc = {"format": kind, "format_version": 1, **meta,
            "count": len(entries), "entries": entries}
     return json.dumps(doc, ensure_ascii=True, indent=1).encode("ascii")
 
@@ -450,3 +450,105 @@ def audit_export(store, k, interface, stream, fmt, count, query, user):
              "detail": f"exported {count} {stream} entr{'y' if count == 1 else 'ies'} as {fmt}"}
     audit_id = store.xadd(k["audit"], audit)
     return audit_id.decode() if isinstance(audit_id, bytes) else audit_id
+
+
+# ---- the audit log (decision C15) ----------------------------------------------
+# Every admin action, rules change, release, review, export, spike and SDLS key
+# reload, newest first. Fields differ per action, so each entry is returned as
+# its cleaned fields plus the few every entry has.
+
+AUDIT_COMMON = ("time", "action", "ok", "detail", "reason", "requested_by", "user")
+AUDIT_JSON_FIELDS = ("changes", "previous", "problems", "filters", "entry_ids")
+AUDIT_FIELD_CHARS = 2000
+
+
+def audit_query(params, max_limit=MAX_LIMIT):
+    def get(name):
+        return (params.get(name) or "").strip()
+
+    try:
+        limit = int(get("limit") or DEFAULT_LIMIT)
+    except ValueError:
+        raise QueryError("limit must be a whole number") from None
+    if not 1 <= limit <= max_limit:
+        raise QueryError(f"limit must be 1 to {max_limit}")
+    action = get("action").upper()
+    if action and not re.fullmatch(r"[A-Z_]{1,32}", action):
+        raise QueryError("action must be an action name such as RELOAD_RULES")
+    ok = get("ok").lower()
+    if ok and ok not in ("true", "false"):
+        raise QueryError("ok must be true or false")
+    before = get("before")
+    return {"limit": limit, "action": action, "ok": ok,
+            "search": _printable(get("search"), "search", SEARCH_CHARS).lower(),
+            "before": entry_id_param(before, "before") if before else ""}
+
+
+def audit_view(entry_id, fields):
+    fields = _decode_fields(fields)
+    view = {"id": clean(entry_id, 48)}
+    for name in AUDIT_COMMON:
+        view[name] = clean(fields.get(name, b""), AUDIT_FIELD_CHARS)
+    view["ok"] = view["ok"] == "true"
+    details = {}
+    for name in sorted(fields):
+        if name in AUDIT_COMMON:
+            continue
+        value = fields[name]
+        parsed = None
+        if name in AUDIT_JSON_FIELDS:
+            try:
+                parsed = json.loads(value.decode("utf-8", "replace") if isinstance(value, bytes) else value)
+            except (ValueError, TypeError):
+                parsed = None
+        details[clean(name, 64)] = clean_json(parsed) if parsed is not None else clean(value, AUDIT_FIELD_CHARS)
+    view["fields"] = details
+    return view
+
+
+def audit_matches(view, query):
+    if query["action"] and view["action"] != query["action"]:
+        return False
+    if query["ok"] and view["ok"] != (query["ok"] == "true"):
+        return False
+    if query["search"]:
+        haystack = " ".join((view["action"], view["detail"], view["reason"], view["requested_by"], view["user"],
+                             json.dumps(view["fields"]))).lower()
+        if query["search"] not in haystack:
+            return False
+    return True
+
+
+def list_audit(store, k, query, max_scan=MAX_SCAN):
+    """The newest matching audit entries, newest first, like list_entries."""
+    upper = f"({query['before']}" if query["before"] else "+"
+    found, scanned, last_id, exhausted = [], 0, None, False
+    while len(found) < query["limit"] and scanned < max_scan:
+        requested = min(SCAN_BATCH, max_scan - scanned)
+        batch = store.xrevrange(k["audit"], upper, "-", count=requested)
+        if not batch:
+            exhausted = True
+            break
+        for raw_id, fields in batch:
+            entry_id = _str({"i": raw_id}, "i")
+            scanned += 1
+            last_id = entry_id
+            view = audit_view(entry_id, fields)
+            if audit_matches(view, query):
+                found.append(view)
+                if len(found) == query["limit"]:
+                    break
+        upper = f"({last_id}"
+        if len(batch) < requested and len(found) < query["limit"]:
+            exhausted = True
+            break
+    return {"entries": found, "scanned": scanned, "stream_length": store.xlen(k["audit"]),
+            "next_before": None if exhausted else last_id}
+
+
+def audit_actions(store, k, sample=MAX_SCAN):
+    """The action names in the newest `sample` audit entries, for the filter."""
+    names = set()
+    for _, fields in store.xrevrange(k["audit"], "+", "-", count=sample):
+        names.add(_str(_decode_fields(fields), "action"))
+    return sorted(n for n in names if re.fullmatch(r"[A-Z_]{1,32}", n))

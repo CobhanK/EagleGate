@@ -6,6 +6,9 @@
 Environment:
   EAGLEGATE_SIDECAR_KEY_FILE  file holding the channel key as hex (a docker
                               secret; default /run/secrets/eaglegate_sidecar_key)
+  EAGLEGATE_SDLS_KEY_FILE     key_source "custom": the SDLS keys (a docker
+                              secret; default /run/secrets/eaglegate_sdls_keys,
+                              format in keystore.py)
   EAGLEGATE_SIDECAR_KEY       the key itself, when there is no file (tests)
   EAGLEGATE_SIDECAR_KEY_ID    its key id (default "default")
 
@@ -26,8 +29,9 @@ import eaglegate_sdls_sidecar_protocol as wire
 
 from . import config as cfg
 from . import keys as key_info
+from . import keystore
 
-SIDECAR_VERSION = "0.2.0"
+SIDECAR_VERSION = "0.3.0"
 DEFAULT_PORT = 7710
 DEFAULT_KEY_FILE = "/run/secrets/eaglegate_sidecar_key"
 MAX_CONNECTIONS = 16
@@ -41,7 +45,10 @@ def log(text):
 class Sidecar:
     """The protocol logic, independent of sockets (tests drive it directly)."""
 
-    def __init__(self, sidecar_config, engine, channel_keys, known_test_keys=None):
+    def __init__(self, sidecar_config, engine, channel_keys, known_test_keys=None, key_file=None,
+                 key_file_problems=None):
+        """key_file / key_file_problems: key_source "custom" only, the secret's
+        path and what was wrong in it at start (keystore.read_key_file)."""
         if not channel_keys:
             raise ValueError("no channel key: set EAGLEGATE_SIDECAR_KEY_FILE (or EAGLEGATE_SIDECAR_KEY)")
         self.config = sidecar_config
@@ -51,6 +58,10 @@ class Sidecar:
         self.counts = dict.fromkeys(("requests", "verified", "decrypted", "clear", "failed", "refused",
                                      "auth_failures"), 0)
         self.count_lock = threading.Lock()
+        self.key_file = key_file
+        self.key_file_problems = list(key_file_problems or []) + list(getattr(engine, "load_problems", []))
+        self.reload_lock = threading.Lock()
+        self.reloads = 0
         self.info = self._info()
 
     def _info(self):
@@ -67,7 +78,13 @@ class Sidecar:
                 "mac_len": sa.mac_len, "iv_total_len": sa.iv_total_len, "arsn_len": sa.arsn_len,
                 "mask": key_info.mask_coverage(sa, self.config.tm), "keys": keys}
         tm = self.config.tm
+        problems = list(self.key_file_problems)
+        if self.config.key_source == "custom":
+            reports = {spi: sas[str(spi)]["keys"] for spi in self.config.sas}
+            problems += keystore.sa_key_problems(self.config, self.engine, reports)
         return {"sidecar": SIDECAR_VERSION, "cryptolib": self.engine.version, "key_source": self.config.key_source,
+                "key_file": self.key_file if self.config.key_source == "custom" else None,
+                "key_problems": problems[:wire.MAX_PROBLEMS], "key_reloads": self.reloads,
                 "known_test_keys": self.known is not None,
                 "tm": {"tfvn": tm.tfvn, "scid": tm.scid, "frame_length": tm.frame_length, "has_fecf": tm.has_fecf,
                        "has_ocf": tm.has_ocf, "secondary_header_length": tm.secondary_header_length},
@@ -103,6 +120,8 @@ class Sidecar:
             answer = {"op": "info", "id": request_id, "ok": True, **self.info, "counts": dict(self.counts)}
         elif op == "tm_process":
             answer = self._tm_process(message, request_id)
+        elif op == "reload_keys":
+            answer = self.reload_keys(request_id)
         else:
             raise wire.SidecarProtocolError(f"unknown op {op!r}")
         return wire.sign(state["key"], state["session"], "response", answer)
@@ -120,6 +139,34 @@ class Sidecar:
         server_nonce = wire.new_nonce()
         state.update(session=wire.session_id(client_nonce, server_nonce), key=key)
         return wire.hello_response(key, kid, client_nonce, server_nonce)
+
+    def reload_keys(self, request_id):
+        """Re-read the key secret into CryptoLib's custom ring (decision D12).
+        A file that cannot be read at all changes nothing; bad entries are
+        skipped and reported, like at start."""
+        if self.config.key_source != "custom":
+            return wire.reload_keys_response(request_id, False, 0, [], 'key_source is "internal": CryptoLib\'s '
+                                             "built-in test keys cannot be reloaded")
+        with self.reload_lock:
+            try:
+                keys, problems = keystore.read_key_file(self.key_file)
+            except keystore.KeyFileError as error:
+                log(f"key reload refused, keys unchanged: {error}")
+                return wire.reload_keys_response(request_id, False, 0, [str(error)],
+                                                 "keys unchanged: the key file cannot be used")
+            try:
+                problems += self.engine.load_keys(keys)
+            finally:
+                keystore.wipe(keys)
+            self.reloads += 1
+            self.key_file_problems = problems
+            self.info = self._info()
+            current = self.info["key_problems"]
+        log(f"keys reloaded from {self.key_file}: {len(keys)} key(s)"
+            + (f"; {len(current)} problem(s): {'; '.join(current)}" if current else ""))
+        return wire.reload_keys_response(request_id, True, len(keys), current,
+                                         f"{len(keys)} key(s) loaded" + (f", {len(current)} problem(s)"
+                                                                          if current else ""))
 
     def _tm_process(self, message, request_id):
         self._count("requests")
@@ -248,14 +295,25 @@ def main(argv=None):
     args = parser.parse_args(argv)
     from .engine import CryptoLibEngine
 
+    sdls_keys, key_file, file_problems = [], None, []
     try:
         sidecar_config = cfg.load(args.config)
         keys = channel_keys_from_env()
-        engine = CryptoLibEngine(sidecar_config)
-        sidecar = Sidecar(sidecar_config, engine, keys, key_info.load_known())
+        if sidecar_config.key_source == "custom":
+            key_file = keystore.key_file_path()
+            try:
+                sdls_keys, file_problems = keystore.read_key_file(key_file)
+            except keystore.KeyFileError as error:
+                file_problems = [str(error)]  # start and report (decision D12): no keys, frames fail
+        engine = CryptoLibEngine(sidecar_config, custom_keys=sdls_keys)
+        sidecar = Sidecar(sidecar_config, engine, keys, key_info.load_known(), key_file, file_problems)
     except (cfg.ConfigError, ValueError, OSError, RuntimeError) as error:
         log(f"cannot start: {error}")
         return 1
+    finally:
+        keystore.wipe(sdls_keys)
+    for problem in sidecar.info["key_problems"]:
+        log(f"KEY PROBLEM: {problem}")
     test = [spi for spi, sa in sidecar.info["security_associations"].items()
             if any(k.get("test_key") for k in sa["keys"].values())]
     log(f"CryptoLib {engine.version}, SAs {sorted(sidecar_config.sas)}, key source {sidecar_config.key_source}"

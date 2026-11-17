@@ -90,10 +90,37 @@ function fileName(headers, fallback) {
 
 // An export (JSON or pcap) as a browser download; resolves with the file name.
 // The review service records every export in the audit log (decision C14).
-export async function exportEntries(params) {
+export function exportEntries(params) {
+  return download(
+    `${PREFIX}/export`,
+    params,
+    `eaglegate-export.${params.format === 'pcap' ? 'pcap' : 'json'}`,
+  )
+}
+
+// The audit log, newest first: { entries, actions, scanned, stream_length,
+// next_before } (decision C15)
+export async function listAudit(params) {
+  try {
+    const { data } = await Api.get(`${PREFIX}/audit`, {
+      params,
+      headers: headers(),
+    })
+    return data
+  } catch (error) {
+    throw failure(error)
+  }
+}
+
+// The matching audit entries as a JSON download (itself audited)
+export function exportAudit(params) {
+  return download(`${PREFIX}/audit/export`, params, 'eaglegate-audit.json')
+}
+
+async function download(path, params, fallbackName) {
   let response
   try {
-    response = await Api.get(`${PREFIX}/export`, {
+    response = await Api.get(path, {
       params,
       headers: headers(),
       responseType: 'blob',
@@ -110,10 +137,7 @@ export async function exportEntries(params) {
     }
     throw failure(error)
   }
-  const name = fileName(
-    response.headers,
-    `eaglegate-export.${params.format === 'pcap' ? 'pcap' : 'json'}`,
-  )
+  const name = fileName(response.headers, fallbackName)
   const url = URL.createObjectURL(response.data)
   try {
     const link = document.createElement('a')

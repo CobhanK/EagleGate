@@ -78,6 +78,7 @@ class FrameSecurity:
     def status(self):
         """Plain data for interface_details (the Crypto backend panel)."""
         return {"backend": self.name, "connected": None, "sidecar": None, "cryptolib": None, "key_source": None,
+                "key_problems": None, "key_reloads": None,
                 "sa_match": None, "mismatch": None, "test_key_spis": None, "latency_ms": None, "last_error": None}
 
     def close(self):

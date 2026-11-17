@@ -14,6 +14,9 @@
   packet counted per APID, plus panels and admin actions that extensions
   describe (e.g. the SDLS plugin's frame counts and Reset anti-replay counter).
 
+  The Audit log tab (AuditLog.vue) shows what admins did and every rules
+  change, newest first, with filters and a JSON export (admins only).
+
   The Quarantine tab (QuarantineReview.vue) lists the packets the firewall
   rejected, with why, for admins only: review states, the bytes as a hex dump,
   and Release (an admin request: the firewall sends the packet on, once).
@@ -102,7 +105,12 @@
       <v-tab value="rules">Rules</v-tab>
       <v-tab value="link">Link status</v-tab>
       <v-tab value="quarantine">Quarantine</v-tab>
+      <v-tab value="audit">Audit log</v-tab>
     </v-tabs>
+
+    <!-- What admins did and every rules change; admins only (the review
+         microservice asks COSMOS); loads only while shown -->
+    <audit-log v-if="tab === 'audit'" :interface-name="interfaceName" />
 
     <!-- Rejected packets: list, filter, review, release. Admins only (the
          review microservice asks COSMOS); loads only while shown -->
@@ -676,6 +684,7 @@
 
 <script>
 import { TopBar } from '@openc3/vue-common/components'
+import AuditLog from './AuditLog.vue'
 import LinkStatus from './LinkStatus.vue'
 import QuarantineReview from './QuarantineReview.vue'
 import { quarantineFocus } from '../../widgets/recentRejections.js'
@@ -718,7 +727,14 @@ const EMPTY_RULES = { version: 0, default_action: 'DENY', rules: [] }
 const INTERFACE_KEY = 'eaglegate.interface' // remembers the last interface edited
 
 export default {
-  components: { LinkStatus, QuarantineReview, RuleEditor, SchemaField, TopBar },
+  components: {
+    AuditLog,
+    LinkStatus,
+    QuarantineReview,
+    RuleEditor,
+    SchemaField,
+    TopBar,
+  },
   data() {
     return {
       title: 'EagleGate Firewall Rules',

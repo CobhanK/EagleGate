@@ -53,6 +53,7 @@ Every rejected packet is stored with the reason, in capped Valkey streams per in
 - **Review:** mark entries reviewed, false positive, threat or dismissed, with a note.
 - **Release:** send a wrongly rejected packet on into COSMOS. This is once per entry, audited, and the rules are not checked again.
 - **Export:** download matching entries as JSON or pcap (for Wireshark). Each export is audited.
+- **Audit log tab:** everything admins did and every rules change, newest first, with filters and a JSON export.
 - **Retention:** how many entries are kept, and for how long, are settings on the Rules tab.
 
 Operators see the last 10 rejections (no bytes) with the **`FIREWALLREJECTIONS`** Telemetry Viewer widget (`FIREWALLREJECTIONS EAGLEGATE` in a screen; it is on the shipped Firewall screen).
@@ -65,7 +66,9 @@ The tab needs the `EAGLEGATE_QUARANTINE` microservice that the core plugin insta
 A second plugin that sits in front of the firewall. It receives SDLS-protected CCSDS TM transfer frames, checks them (spacecraft and virtual channel, SPI binding, anti-replay, frame counts) and hands the packets to the firewall. Packet rules can then match on `"link": {"vcid": ..., "spi": ..., "protection": ...}`. Install the core plugin first; build with `./EagleGate/eagle.sh build-sdls -v 1.x.x` (or `build-core-sdls` for both plugins, `build-all` for both plugins and the sidecar). Setup, including NOS3, is in `openc3-cosmos-eaglegate-sdls/README.md`.
 
 ### CryptoLib sidecar (`openc3-cosmos-eaglegate-sdls/sidecar/`)
-A Docker image (`eaglegate-sdls-sidecar`), not part of the gem: its sources live in the SDLS plugin folder, but `build-sdls` leaves them out of the gem and out of the copy in `cosmos/`. NASA CryptoLib verifies and decrypts the SDLS frames there; the keys stay in that container, and EagleGate talks to it over an HMAC-authenticated channel. Build, test and run it with `./eagle.sh build-sidecar | test-sidecar | sidecar-key | run-sidecar`. Details are in `openc3-cosmos-eaglegate-sdls/sidecar/README.md`.
+A Docker image (`eaglegate-sdls-sidecar`), not part of the gem: its sources live in the SDLS plugin folder, but `build-sdls` leaves them out of the gem and out of the copy in `cosmos/`. NASA CryptoLib verifies and decrypts the SDLS frames there; the keys stay in that container, and EagleGate talks to it over an HMAC-authenticated channel. Build, test and run it with `./eagle.sh build-sidecar | test-sidecar | sidecar-key | run-sidecar`.
+
+For real SDLS keys, set `"key_source": "custom"` in the sidecar configuration and put the keys in `sidecar/secrets/sdls/keys.json`. Without that, it uses CryptoLib's published test keys, which are only for labs such as NOS3. Keys can be rotated without a restart with **Reload keys** on the Link status tab. Details are in `openc3-cosmos-eaglegate-sdls/sidecar/README.md`.
 
 Design decisions, including the SDLS findings, are recorded in [DECISIONS.md](DECISIONS.md), and dependencies in [SBOM.md](SBOM.md).
 

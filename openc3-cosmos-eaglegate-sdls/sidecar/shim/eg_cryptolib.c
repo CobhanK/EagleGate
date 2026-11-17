@@ -10,14 +10,19 @@
  *
  * Not thread safe (CryptoLib keeps global state): the caller serializes calls.
  *
- * Built against CryptoLib with -DKEY_INTERNAL=ON -DSA_INTERNAL=ON
- * -DMC_DISABLED=ON -DCRYPTO_LIBGCRYPT=ON (see ../Dockerfile).
+ * Built against CryptoLib with -DKEY_INTERNAL=ON -DKEY_CUSTOM=ON
+ * (KEY_CUSTOM_PATH=key_custom/) -DSA_INTERNAL=ON -DMC_DISABLED=ON
+ * -DCRYPTO_LIBGCRYPT=ON (see ../Dockerfile).
  */
 #include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 
 #include "crypto.h"
+
+/* key_custom/eg_key_interface_custom.c, built into libcryptolib */
+int32_t eg_custom_key_clear(void);
+int32_t eg_custom_key_set(uint32_t key_id, const uint8_t *value, uint32_t key_len, uint8_t key_state);
 
 #define EG_ERR_ARG   (-9001) /* a bad argument from the caller */
 #define EG_ERR_SPACE (-9002) /* an output buffer is too small */
@@ -34,11 +39,13 @@ int eg_abm_size(void) { return ABM_SIZE; }
 
 /* Step 1: global and TM configuration. Anti-replay is OFF on purpose: CryptoLib
  * would save the SA (ARSN/IV) after every frame; EagleGate does anti-replay
- * itself, so each call here stays a pure check. */
-int eg_configure(int check_fecf)
+ * itself, so each call here stays a pure check. custom_keys: CryptoLib's
+ * custom key interface (keys from the sidecar's secret) instead of its
+ * internal ring of published test keys. */
+int eg_configure(int check_fecf, int custom_keys)
 {
-    int32_t status = Crypto_Config_CryptoLib(KEY_TYPE_INTERNAL, MC_TYPE_DISABLED, SA_TYPE_INMEMORY,
-                                             CRYPTOGRAPHY_TYPE_LIBGCRYPT, IV_INTERNAL);
+    int32_t status = Crypto_Config_CryptoLib(custom_keys ? KEY_TYPE_CUSTOM : KEY_TYPE_INTERNAL, MC_TYPE_DISABLED,
+                                             SA_TYPE_INMEMORY, CRYPTOGRAPHY_TYPE_LIBGCRYPT, IV_INTERNAL);
     if (status != CRYPTO_LIB_SUCCESS)
         return status;
     return Crypto_Config_TM(CRYPTO_TM_CREATE_FECF_FALSE, TM_IGNORE_ANTI_REPLAY_TRUE,
@@ -228,6 +235,21 @@ int eg_tm_process(const uint8_t *frame, int frame_len, uint8_t *pdu_out, int pdu
     free(copy);
     return status;
 }
+
+/* The custom key ring (custom_keys only). The caller wipes its own copy. */
+int eg_key_clear(void) { return eg_custom_key_clear(); }
+
+int eg_key_set(int key_id, const uint8_t *value, int key_len, int key_state)
+{
+    if (key_id < 0 || key_len < 0 || key_state < 0 || key_state > 0xFF)
+        return EG_ERR_ARG;
+    return eg_custom_key_set((uint32_t)key_id, value, (uint32_t)key_len, (uint8_t)key_state);
+}
+
+/* The key length CryptoLib expects for a cipher / MAC suite (CryptoLib's own
+ * table), or a negative value when it does not know the suite */
+int eg_ecs_keylen(int ecs) { return Crypto_Get_ECS_Algo_Keylen((uint8_t)ecs); }
+int eg_acs_keylen(int acs) { return Crypto_Get_ACS_Algo_Keylen((uint8_t)acs); }
 
 const char *eg_status_name(int status)
 {
