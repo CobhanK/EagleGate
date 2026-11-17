@@ -99,7 +99,7 @@ def parse_request(text, kind, expected_sha256, now=None):
         raise RequestError("reason contains control or invisible characters")
 
     nonce = doc.get("nonce")
-    if not isinstance(nonce, str) or not NONCE.match(nonce):
+    if not isinstance(nonce, str) or not NONCE.fullmatch(nonce):
         raise RequestError("nonce must be 16-64 letters, digits or '-'")
 
     requested_by = doc.get("requested_by", "")

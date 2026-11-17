@@ -33,6 +33,8 @@ TELEMETRY EAGLEGATE_SDLS FIREWALL_STATUS BIG_ENDIAN "Firewall rejection counts a
   APPEND_ITEM    PACKETS              32 UINT    "Packets judged by the rules (allowed + rejected), since the interface started"
   APPEND_ITEM    ALLOWED              32 UINT    "Packets allowed through to COSMOS"
   APPEND_ITEM    SEQ_GAPS             32 UINT    "Packets whose CCSDS sequence count did not follow the previous one of their APID"
+  # Quarantine review tool (eaglegate_release.py)
+  APPEND_ITEM    RELEASED             32 UINT    "Quarantined packets an admin released into COSMOS (rules not re-checked)"
 
 # Published by the SDLS frame protocol (eaglegate_sdls_status.py), never received.
 # Its ID is CCSDS version 6, which the firewall's structural check rejects on

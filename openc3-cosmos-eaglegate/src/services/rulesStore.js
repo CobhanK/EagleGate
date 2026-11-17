@@ -201,7 +201,7 @@ export async function applyRules(iface, text, baseSha256) {
   )
 }
 
-function userName() {
+export function userName() {
   try {
     const user = OpenC3Auth.user?.()
     return user?.preferred_username || user?.name || ''

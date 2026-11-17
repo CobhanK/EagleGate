@@ -43,6 +43,7 @@ def test_sha256_is_compared_case_insensitively():
     ({"reason": "abc\u202edef"}, "control or invisible"),
     ({"nonce": "short"}, "nonce must be"),
     ({"nonce": "has spaces in it ok"}, "nonce must be"),
+    ({"nonce": "0123456789abcdef0123\n"}, "nonce must be"),  # "$" would let the newline through
     ({"requested_by": 7}, "requested_by"),
     ({"requested_by": "x" * 65}, "requested_by"),
     ({"params": []}, "params must be an object"),

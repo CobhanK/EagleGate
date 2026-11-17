@@ -71,6 +71,10 @@ EagleGate Firewall page, then sends this command with its sha256
 (eaglegate_admin_requests.py: an operator's command alone cannot do it). The
 connection keeps its socket, which matters when the sender never reconnects.
 
+RELEASE <sha256>: the same, with requests/release.json naming one quarantine
+entry: the firewall sends that packet on into COSMOS without checking the
+rules again, at most once per entry (eaglegate_release.py).
+
 Extensions (eaglegate_extensions.py): protocols placed BEFORE this one on the
 interface may own a section of the rules file and attach link information to
 packets. They use the "Extension API" methods below.
@@ -84,6 +88,7 @@ from collections import deque
 from eaglegate_admin_requests import NonceLog, RequestError, parse_request
 from eaglegate_ccsds_header import CCSDS_HEADER_BYTES, CcsdsHeader
 from eaglegate_extensions import FIREWALL_API_VERSION, collect_extensions, link_of
+from eaglegate_release import ReleaseError, check_entry, deliver, release_params
 from eaglegate_quarantine import RAW_CAPTURE_BYTES, QuarantineWriter, StatusPublisher, header_of, utc_now
 from eaglegate_rules_error import RulesError
 from eaglegate_rules_parser import TOP_LEVEL_KEYS, parse_rules
@@ -149,6 +154,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.untrusted_since = None
         self.untrusted_cause = None        # the rejection that made it untrusted, for the page
         self.trust_restores = 0
+        self.released = 0                  # quarantined packets an admin sent on (RELEASE)
         self.extensions = {}               # section -> Extension, found when the rules load
         self.nonces = NonceLog()           # admin requests already used
         self.admin_actions = deque(maxlen=RECENT_ADMIN_ACTIONS)
@@ -375,6 +381,69 @@ class EaglegateFirewallProtocol(LengthProtocol):
         return self.record_admin_action("RESTORE_TRUST", True, f"trust restored (untrusted since {since}: {cause})",
                                         request, previous_cause=cause)
 
+    def release(self, request_sha256):
+        """RELEASE: send one quarantined packet on into COSMOS (eaglegate_release.py).
+        Runs on the command thread. Returns True when the packet was delivered."""
+        try:
+            request = self.admin_request("release", request_sha256)
+        except RequestError as error:
+            return self.record_admin_action("RELEASE", False, str(error), request_sha256=request_sha256 or "")
+        entry_id = ""
+        try:
+            entry_id, digest = release_params(request.params)
+            writer = self._quarantine_writer()
+            try:
+                fields = writer.read_entry(entry_id)
+            except Exception as error:
+                raise ReleaseError(f"could not read quarantine entry {entry_id}: "
+                                   f"{type(error).__name__}: {error}") from None
+            data = check_entry(fields, entry_id, self._name(), digest)
+            record = {"time": utc_now(), "reason": request.reason, "requested_by": request.requested_by,
+                      "request_sha256": request.sha256, "sha256": digest}
+            try:
+                claimed = writer.claim_release(entry_id, record)
+            except Exception as error:
+                raise ReleaseError(f"could not mark entry {entry_id} as released: "
+                                   f"{type(error).__name__}: {error}") from None
+            if not claimed:
+                raise ReleaseError(f"quarantine entry {entry_id} was already released{self._released_when(entry_id)}")
+            try:
+                target_name, packet_name = self._deliver(data, entry_id)
+            except Exception as error:
+                self._unclaim(entry_id)
+                cause = str(error) if isinstance(error, ReleaseError) else f"{type(error).__name__}: {error}"
+                raise ReleaseError(f"quarantine entry {entry_id} was not delivered: {cause}") from None
+        except ReleaseError as error:
+            return self.record_admin_action("RELEASE", False, str(error), request, entry_id=entry_id)
+        self.released += 1
+        self.status_due = True
+        rule = _field_text(fields, "rule_id") or _field_text(fields, "stage")
+        return self.record_admin_action(
+            "RELEASE", True, f"released quarantine entry {entry_id} as {target_name} {packet_name} "
+            f"(rejected by {rule}); the rules were not checked again", request,
+            entry_id=entry_id, sha256=digest, target_name=target_name, packet_name=packet_name,
+            apid=_field_text(fields, "apid"), rule_id=_field_text(fields, "rule_id"))
+
+    def _deliver(self, data, entry_id):
+        """COSMOS boundary (eaglegate_release.deliver); tests replace it."""
+        return deliver(self.interface, data, entry_id, self.scope)
+
+    def _released_when(self, entry_id):
+        try:
+            previous = self._quarantine_writer().release_record(entry_id) or {}
+        except Exception:
+            return ""
+        who = previous.get("requested_by") or "?"
+        return f" at {previous.get('time', '?')} (requested by {who})"
+
+    def _unclaim(self, entry_id):
+        try:
+            self._quarantine_writer().unclaim_release(entry_id)
+        except Exception as error:
+            # The entry stays marked released, although it was not delivered: say so
+            Logger.error(f"{self._name()} firewall: entry {entry_id} was not delivered but stays marked "
+                         f"released ({type(error).__name__}: {error})")
+
     # ---- status packet -------------------------------------------------------
 
     def _publish_status_if_due(self, force=False):
@@ -406,6 +475,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "DENIED_STRUCTURAL": _u32(self.rejected_by_stage[STRUCTURAL]),
             "DENIED_LINK": _u32(self.rejected_by_stage[LINK]),
             "TRUST_RESTORES": _u32(self.trust_restores),
+            "RELEASED": _u32(self.released),
             "PACKETS": _u32(self.traffic.packets),
             "ALLOWED": _u32(self.traffic.allowed),
             "SEQ_GAPS": _u32(self.traffic.seq_gaps),
@@ -451,12 +521,15 @@ class EaglegateFirewallProtocol(LengthProtocol):
 
         RELOAD_RULES [base_sha256 [pending_sha256]]: the sha256 of the rule set the
         editor started from, then the sha256 of the pending file it uploaded.
-        RESTORE_TRUST <request_sha256>: see the module docstring.
+        RESTORE_TRUST <request_sha256> and RELEASE <request_sha256>: see the module docstring.
         Other commands are left to the other protocols (extensions) on the interface."""
         name = str(cmd_name).upper()
         if name == "RESTORE_TRUST":
             self.restore_trust(_optional(cmd_args[0]) if cmd_args else None)
             self.status_due = True  # published by the read thread, like RELOAD_RULES
+            return True
+        if name == "RELEASE":
+            self.release(_optional(cmd_args[0]) if cmd_args else None)
             return True
         if name == "RELOAD_RULES":
             base_sha256, pending_sha256 = (list(map(_optional, cmd_args)) + [None, None])[:2]
@@ -604,6 +677,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "untrusted_since": self.untrusted_since,
             "untrusted_cause": self.untrusted_cause,
             "trust_restores": self.trust_restores,
+            "released": self.released,
             "connection_id": self.connection_id,
             "interface_warning": self.interface_warning,
             "api_version": FIREWALL_API_VERSION,
@@ -652,6 +726,11 @@ def interface_warning(interface):
 def _optional(arg):
     """interface_protocol_cmd arguments arrive as strings; "", None and "None" mean unset."""
     return None if arg in (None, "", "None", "nil") else str(arg)
+
+
+def _field_text(fields, name):
+    value = (fields or {}).get(name, b"")
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
 
 
 def _u32(count):

@@ -222,7 +222,17 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
   - Continuity starts over on each connection. Totals run from interface start.
   - `FIREWALL_STATUS` carries `PACKETS`, `ALLOWED` and `SEQ_GAPS`, published at most once a second while traffic flows. The full table is in `interface_details` under `firewall.traffic`.
 - `interface_details("EAGLEGATE_INT")` also shows the rule hit counts, where the rules came from, the load and save errors, and the last 20 rejection reasons.
-- **Not built yet:** the review and release tool. The name `QUARANTINE_REVIEW` is reserved in `stream_names()`. Stream contents are admin-only.
+- **Review and release** (decisions C5–C8 in `EagleGate/DECISIONS.md`), on the EagleGate page's **Quarantine** tab. It is for admins only.
+  - **The review microservice** (`microservices/EAGLEGATE_QUARANTINE/`, standard library only) serves `/eaglegate-quarantine/entries`, `/entry` and `/review`. It asks the COSMOS server whether each caller is an admin by forwarding their token to the admin-only `GET /openc3-api/secrets`.
+  - **The list** shows the most recent N entries (N is 1–1000, set on the page), filtered by stream, stage, rule id, APID, review state or text. Each row expands to show the metadata, the decoded CCSDS header, link values and a hex/ASCII dump.
+  - **Text is made safe:** the microservice escapes control and invisible characters and sends the bytes only as hex. The page never uses `v-html`.
+  - **Review states:** `reviewed`, `false_positive`, `threat`, `dismissed`, or `new` to clear. They go in `…QUARANTINE_REVIEW__<iface>`, and each change writes an audit entry.
+  - **Release:** `RELEASE <request sha256>` (`lib/eaglegate_release.py`) is an admin request like Restore trust. It names the entry id and the sha256 of its bytes. The firewall:
+    - releases only whole framed entries, at most once each (HSETNX in `…QUARANTINE_RELEASED__<iface>`);
+    - does not check the rules again;
+    - writes the packet to COSMOS telemetry tagged `extra.eaglegate_released`, and audits it.
+    
+    `FIREWALL_STATUS.RELEASED` counts releases.
 
 ## 7. Key classes and objects
 
@@ -236,7 +246,9 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
 | `Match` | `lib/eaglegate_match.py` | The "does this rule apply?" conditions, with parsing and a readable `summary` |
 | `Verdict` | `lib/eaglegate_verdict.py` | Frozen decision record. The `stage` is RULE, DEFAULT, ERROR, STRUCTURAL, UNTRUSTED or LINK (an extension; `layer` says which part of it) |
 | `Extension`, `collect_extensions()` | `lib/eaglegate_extensions.py` | How another plugin's protocol in front of the firewall adds a rules section and link match keys (section 9) |
-| `parse_request()`, `NonceLog` | `lib/eaglegate_admin_requests.py` | Checks admin request files for RESTORE_TRUST and extension commands |
+| `parse_request()`, `NonceLog` | `lib/eaglegate_admin_requests.py` | Checks admin request files for RESTORE_TRUST, RELEASE and extension commands |
+| `check_entry()`, `deliver()` | `lib/eaglegate_release.py` | RELEASE: checks a quarantine entry and sends its packet on into COSMOS |
+| `ReviewApp`, `AdminCheck` | `microservices/EAGLEGATE_QUARANTINE/` | The quarantine review service: admin check through COSMOS, listing, review states |
 | `parse_rules()`, `rules_schema()` | `lib/eaglegate_rules_parser.py` | JSON text to `Ruleset` with strict validation. `RULE_TYPES` is the registry of rule types. `rules_schema()` describes the format for the tool page |
 | `RulesStore` | `lib/eaglegate_rules_store.py` | Reads the pending, active and original rules; saves active and history. Never raises on writes |
 | `QuarantineWriter`, `StatusPublisher` | `lib/eaglegate_quarantine.py` | Valkey stream storage and the `FIREWALL_STATUS` packet |

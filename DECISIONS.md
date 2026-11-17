@@ -51,6 +51,56 @@ Each entry covers:
 - **Decision:** extension plugins declare `panels` and `actions` as data. The core checks them when rules load and fails closed. The page draws them without knowing the extension.
 - **Why:** the core page needs no code change for each new extension.
 
+### C5. The quarantine review tool is admin-only, and the COSMOS server decides (2026-11-16)
+- **Decision:**
+  - A plugin microservice, `EAGLEGATE_QUARANTINE`, routed at `/eaglegate-quarantine`, reads the quarantine for the page's Quarantine tab and stores review states.
+  - On every request it forwards the caller's own COSMOS token to `GET /openc3-api/secrets`. That endpoint is admin-only, lists secret names (never values) and changes nothing. COSMOS answers 200 for admins, and 401 or 403 otherwise; the microservice passes 401 and 403 back. A yes is cached for 30 s per token (keyed by its sha256). Tokens are never logged.
+  - The user name in the audit entry comes from the Enterprise token, read only after COSMOS accepted it. In Core it is empty, and the name the page sends is kept as "requested_by".
+- **Instead of:**
+  - writing the entries to the config bucket: `download_file` needs only the `system` permission, so every operator could read them;
+  - `interface_details`: readable by everyone with `system`;
+  - COSMOS's admin Redis console (`POST /openc3-api/redis/exec`): admin-only, but it writes every result, packet bytes included, to the COSMOS log, which operators can read;
+  - an admin check in plugin code: Python `authorize()` is a no-op (R2).
+- **Why:** C1 says only admins may view the quarantine, and R2 says the COSMOS server, not plugin code, decides who is an admin.
+- **Known limits:**
+  - In COSMOS Core every logged-in user is an admin (R5).
+  - `ROUTE_PREFIX` must be unique across scopes, so install the core plugin in one scope.
+  - The counts and last reason in `FIREWALL_STATUS` and the Link status tab stay visible to operators, as before. They hold no packet bytes.
+
+### C6. Release sends the packet on without re-checking the rules (2026-11-16)
+- **Decision:**
+  - `RELEASE <request sha256>` is an admin request, like `RESTORE_TRUST`. The page uploads `requests/release.json` (only admins can), naming the entry id and the sha256 of the bytes the admin saw.
+  - The firewall then:
+    - releases only entries of the framed stream (RULE, DEFAULT, ERROR), and only whole, untruncated ones;
+    - checks the bytes against both the stored sha256 and the requested one;
+    - claims the entry with HSETNX in `QUARANTINE_RELEASED__<iface>` before delivering it, so it is released at most once. A failed delivery removes the claim.
+  - The packet is identified against the interface's telemetry targets and written to COSMOS's telemetry stream, tagged `extra.eaglegate_released = <entry id>`. A packet COSMOS doesn't recognise is refused.
+  - Every release, and every refusal, goes to the audit stream. `FIREWALL_STATUS` gains `RELEASED`.
+- **Instead of:** re-checking the packet against the current rules. Sequence and rate rules would always reject an old packet, so a re-check could only cover the content rules.
+- **Why:** the project owner's choice (2026-11-16). A release is an explicit admin override, made with a reason and audited. If the rule was wrong, it should be fixed on the Rules tab as well.
+
+### C7. Quarantined data is shown as untrusted text (2026-11-16)
+- **Decision:**
+  - The microservice sends packet bytes only as hex.
+  - Every text field is made printable, because some of it comes from the packet (text-rule details, link values):
+    - control, format and invisible characters (C0/C1 controls, bidi overrides, zero-width, line separators) become visible escapes such as `\x1b` or `\u202e`;
+    - bad UTF-8 becomes U+FFFD;
+    - long text is cut.
+  - Responses are JSON with `nosniff`, `no-store` and `default-src 'none'`. Errors never include internal details.
+  - The page escapes the text again, renders it only with Vue's `{{ }}` (never `v-html`), and shows only printable ASCII as characters in the hex dump.
+  - Filters, notes and ids are checked on both sides, with full-string matches. (A regex `$` also matches before a trailing newline. The same fix was made to the admin-request nonce check.)
+- **Why:** a quarantined packet is hostile by assumption. It must not be able to inject markup, terminal escapes or misleading text (Trojan Source-style bidi) into the reviewer's screen.
+
+### C8. Review states (2026-11-16)
+- **Decision:**
+  - Review states are `new` (cleared), `reviewed`, `false_positive`, `threat` and `dismissed`, with a note of up to 256 characters.
+  - They are stored in the hash `QUARANTINE_REVIEW__<iface>`, keyed `{stream}:{entry id}`. The raw and framed streams can produce the same id, which is why the stream is part of the key.
+  - `released` is shown from the RELEASED hash and set only by the firewall.
+  - Each change writes one audit entry.
+  - Reviews of entries the capped streams have dropped are pruned once the hash passes 25,000 fields.
+  - The list shows the most recent N entries, where N (1–1000, default 50) is set and remembered per browser, and filters by stream, stage, rule, APID, review state and text. One request scans at most 10,000 entries (the framed stream's cap); "Load older" continues from there.
+- **Why:** the admin needs to triage rejections and leave a record of the call, without writing to the streams themselves.
+
 ## Rules editor
 
 ### R1. Supports Core and Enterprise (2026-10-17)

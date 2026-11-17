@@ -13,17 +13,23 @@ COSMOS's persistent store, so it survives container restarts:
                                                     e.g. a whole transfer frame);
                                                     forensics only, never releasable
   {scope}__EAGLEGATE__QUARANTINE_AUDIT__{interface} admin actions (restore trust,
-                                                    extension resets): who asked,
-                                                    why, and what happened
+                                                    extension resets, reviews,
+                                                    releases): who asked, why,
+                                                    and what happened
+  {scope}__EAGLEGATE__QUARANTINE_REVIEW__{interface}   hash: entry id -> review
+                                                    state (written by the review
+                                                    microservice)
+  {scope}__EAGLEGATE__QUARANTINE_RELEASED__{interface} hash: entry id -> release
+                                                    record (written only by the
+                                                    firewall, at most once per entry)
 
 The raw stream is separate so a flood of garbage cannot push real rule
 denials out of the capped quarantine stream.
 
-Planned for the review tool (not written yet; name reserved here):
-  {scope}__EAGLEGATE__QUARANTINE_REVIEW__{interface}  hash: entry id -> review state
-
-Stream contents are for admins only. The summary packet below (counts and the
-last reason, no packet bytes) is ordinary telemetry for operator screens.
+Stream contents are for admins only: the review microservice
+(microservices/EAGLEGATE_QUARANTINE) asks the COSMOS server whether the caller
+is an admin before it shows any. The summary packet below (counts and the last
+reason, no packet bytes) is ordinary telemetry for operator screens.
 
 Neither class ever raises: a storage problem must not change the firewall's
 decision or disconnect the interface. A failed write is counted, and writes are
@@ -57,6 +63,7 @@ def stream_names(scope, interface_name):
         "raw": f"{base}_RAW__{interface_name}",
         "review": f"{base}_REVIEW__{interface_name}",
         "audit": f"{base}_AUDIT__{interface_name}",
+        "released": f"{base}_RELEASED__{interface_name}",
     }
 
 
@@ -123,6 +130,10 @@ def _stream_value(value):
     return value
 
 
+def _text(value):
+    return value.decode("utf-8", "replace") if isinstance(value, bytes) else str(value)
+
+
 class _Guarded:
     """Counts failures and pauses after one, instead of raising."""
 
@@ -180,16 +191,65 @@ class QuarantineWriter(_Guarded):
         self.audited += 1
         return entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
 
+    # ---- release (eaglegate_release.py); these may raise, the caller reports it ----
+
+    def read_entry(self, entry_id):
+        """The fields of one entry of the FRAMED quarantine stream, as
+        {str: bytes}, or None when it does not exist (never written, or trimmed).
+        Raw entries are never read here: they can never be released."""
+        found = self._range(self.streams["quarantine"], entry_id)
+        if not found:
+            return None
+        _, fields = found[0]
+        return {_text(k): v for k, v in fields.items()}
+
+    def claim_release(self, entry_id, record):
+        """Mark an entry released, atomically (HSETNX): True for the first
+        caller only, so one entry can never be released twice."""
+        return bool(self._hsetnx(self.streams["released"], entry_id, json.dumps(record, sort_keys=True)))
+
+    def release_record(self, entry_id):
+        """The stored release record of an entry (dict), or None."""
+        value = self._hget(self.streams["released"], entry_id)
+        return json.loads(_text(value)) if value else None
+
+    def unclaim_release(self, entry_id):
+        """Undo claim_release when the packet could not be delivered."""
+        self._hdel(self.streams["released"], entry_id)
+
+    # ---- COSMOS boundary: separate methods so tests need no Valkey ----------
+
     def _write(self, stream, fields, maxlen):
-        """XADD with MAXLEN ~maxlen. Separate method so tests need no Valkey."""
+        """XADD with MAXLEN ~maxlen."""
         from openc3.utilities.store import Store
 
         return Store.instance().write_topic(stream, fields, maxlen=maxlen, approximate=True)
 
+    def _range(self, stream, entry_id):
+        from openc3.utilities.store import Store
+
+        return Store.instance().xrange(stream, entry_id, entry_id, count=1)
+
+    def _hsetnx(self, key, field, value):
+        from openc3.utilities.store import Store
+
+        return Store.instance().hsetnx(key, field, value)
+
+    def _hget(self, key, field):
+        from openc3.utilities.store import Store
+
+        return Store.instance().hget(key, field)
+
+    def _hdel(self, key, field):
+        from openc3.utilities.store import Store
+
+        return Store.instance().hdel(key, field)
+
     def summary(self):
         return {
             "streams": {"quarantine": self.streams["quarantine"], "raw": self.streams["raw"],
-                        "audit": self.streams["audit"]},
+                        "audit": self.streams["audit"], "review": self.streams["review"],
+                        "released": self.streams["released"]},
             "audited": self.audited,
             "written": self.written,
             "errors": self.errors,

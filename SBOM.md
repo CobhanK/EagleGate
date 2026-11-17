@@ -18,6 +18,13 @@ Last updated: 2026-11-15
 
 The firewall itself uses only the Python standard library.
 
+The quarantine review microservice (`microservices/EAGLEGATE_QUARANTINE/`, added 2026-11-16) adds no packages either:
+- its HTTP server is `http.server`, and it asks COSMOS through `urllib.request`;
+- its only other imports are `json`, `hashlib`, `base64` and `re`;
+- it reaches Valkey through openc3's `Store`, which the operator container already provides.
+
+The page's Quarantine tab adds no npm packages.
+
 ### Python: development only (tests and lint)
 
 | Package | Version | Why |
