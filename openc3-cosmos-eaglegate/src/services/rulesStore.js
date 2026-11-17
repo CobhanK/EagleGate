@@ -172,13 +172,23 @@ export async function listHistory(prefix) {
 // Upload text as the pending rules, ask the firewall to apply them, and wait
 // for the result. Resolves with the new firewall state; rejects with the
 // firewall's reason when it refused (nothing changed then).
-export async function applyRules(iface, text, baseSha256) {
+// `reason` goes with a change request (requests/reload_rules.json, bound to
+// this file's sha256) into the firewall's audit stream (decision C13).
+export async function applyRules(iface, text, baseSha256, reason) {
   const before = await firewallState(iface)
   const pendingSha256 = await sha256(text)
   await uploadKey(before.rules_keys.pending, text)
+  const request = buildAdminRequest({
+    kind: 'reload_rules',
+    reason,
+    params: { pending_sha256: pendingSha256 },
+    requestedBy: userName(),
+  })
+  const requestSha256 = await sha256(request)
+  await uploadKey(`${before.rules_keys.requests}reload_rules.json`, request)
   await api.exec(
     'interface_protocol_cmd',
-    [iface, 'RELOAD_RULES', baseSha256, pendingSha256],
+    [iface, 'RELOAD_RULES', baseSha256, pendingSha256, requestSha256],
     { read_write: 'READ' },
   )
   // interface_protocol_cmd is fire-and-forget, so poll for the result

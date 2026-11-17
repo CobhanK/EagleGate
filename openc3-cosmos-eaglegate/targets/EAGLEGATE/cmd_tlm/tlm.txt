@@ -75,6 +75,12 @@ TELEMETRY EAGLEGATE FIREWALL_STATUS BIG_ENDIAN "Firewall rejection counts and th
   APPEND_ITEM    SPIKE_REASON       2048 STRING  "Why SPIKE_STATE is what it is"
   APPEND_ITEM    SPIKE_TOP_RULE      512 STRING  "The rule (or stage) behind most rejections of the raised state"
   APPEND_ITEM    SPIKE_SINCE         256 STRING  "UTC time the current raised state began (empty when NORMAL)"
+  # Monitor mode (settings.enforcement, a rule's "monitor"): would-be denials are delivered
+  APPEND_ITEM    MONITORED            32 UINT    "Delivered packets the rules would have denied (monitor mode or monitored rules)"
+  APPEND_ITEM    ENFORCEMENT           8 UINT    "ENFORCE: denials are withheld. MONITOR: the whole rule set only records them"
+    STATE ENFORCE 0 GREEN
+    STATE MONITOR 1 YELLOW
+  APPEND_ITEM    MONITOR_RULES        16 UINT    "Rules that only record their denials (rule setting monitor = true)"
 
 # The 10 most recent rejections, for the FIREWALLREJECTIONS Telemetry Viewer
 # widget (decision C9): metadata and reasons only, never packet bytes; text is

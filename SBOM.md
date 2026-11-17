@@ -23,7 +23,7 @@ The quarantine review microservice (`microservices/EAGLEGATE_QUARANTINE/`, added
 - its only other imports are `json`, `hashlib`, `base64` and `re`;
 - it reaches Valkey through openc3's `Store`, which the operator container already provides.
 
-The page's Quarantine tab adds no npm packages.
+The page's Quarantine tab adds no npm packages. Its exports (JSON and pcap, added 2026-11-16) are written by the microservice with `json` and `struct`. The page downloads them with the browser's own `Blob` and `URL` APIs.
 
 The spike warning (`eaglegate_spike.py`, added 2026-11-16) uses only the standard library: its Poisson tail uses `math.lgamma` and `math.exp`, with no scipy.
 

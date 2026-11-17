@@ -268,6 +268,42 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
   - uncomment `LIMITS_RESPONSE eaglegate_spike_limits_response.py` under `SPIKE_STATE` in `cmd_tlm/tlm.txt` and edit that file (it runs in the decom microservice, with no page needed);
   - or, in COSMOS Enterprise, create an Autonomic trigger on `FIREWALL_STATUS SPIKE_STATE == 'SPIKE'`, with a reaction that notifies or runs a procedure.
 
+## 6b. Monitor mode (decision C12)
+
+- **Whole rule set:** set `"settings": {"enforcement": "monitor"}`, or pick Enforcement: monitor on the Rules tab.
+  - Every packet the rules would deny is delivered. It is also quarantined as "WOULD DENY (monitor)", never releasable, and counted in `FIREWALL_STATUS MONITORED`.
+  - `ENFORCEMENT` turns yellow, which raises a COSMOS notification, and the page shows a banner.
+- **One rule:** add `"monitor": true` to a DENY rule ("Monitor only" in the rule editor).
+  - When it fires, the would-be denial is recorded and the rules below decide the packet.
+  - `MONITOR_RULES` counts these rules.
+- **Monitor shows what enforce would do:**
+  - would-be denials don't teach the sequence or rate rules;
+  - a first packet that would be denied doesn't untrust the connection.
+- **Still enforced:** the structural header check and SDLS's own checks (SDLS has its own `mode`).
+- **Typical rollout:** apply the new rule with `"monitor": true`. Watch the Quarantine tab, the widget or the "WOULD DENY" entries. Then switch it off.
+
+## 6c. Audit log, retention and export (decisions C13, C14)
+
+- **Audit log:** `…QUARANTINE_AUDIT__<iface>` records:
+  - every rules change: `RELOAD_RULES`, or `LOAD_RULES` at start-up or reconnect, with the old and new version and sha256, a summary of what changed, and the reason given on the page;
+  - refused rules;
+  - Restore trust, Release, reviews, exports and spikes.
+
+  The page requires a change reason to apply rules. It is sent as `requests/reload_rules.json`, bound to the file's sha256.
+- **Retention:** these rules settings replace the fixed caps:
+  - `quarantine_max_entries`
+  - `quarantine_raw_max_entries`
+  - `quarantine_raw_capture_bytes`
+  - `quarantine_max_age_days` (0 = keep until the count cap)
+  - `audit_max_entries`
+
+  `interface_details` shows the values in force under `firewall.quarantine.retention`.
+- **Export:** on the Quarantine tab, choose Export…. It downloads the newest entries matching the current filters (up to 10000):
+  - **JSON:** every field, bytes as hex.
+  - **pcap:** link type USER0 (147). In Wireshark, map DLT_USER User 0 to `ccsds`.
+
+  Each export is recorded in the audit log.
+
 ## 7. Key classes and objects
 
 | Class / object | File | Role |
@@ -282,6 +318,9 @@ The pending file is **never** loaded at startup, so an invalid upload can't leav
 | `Extension`, `collect_extensions()` | `lib/eaglegate_extensions.py` | How another plugin's protocol in front of the firewall adds a rules section and link match keys (section 9) |
 | `parse_request()`, `NonceLog` | `lib/eaglegate_admin_requests.py` | Checks admin request files for RESTORE_TRUST, RELEASE and extension commands |
 | `check_entry()`, `deliver()` | `lib/eaglegate_release.py` | RELEASE: checks a quarantine entry and sends its packet on into COSMOS |
+| `SpikeDetector` | `lib/eaglegate_spike.py` | The spike warning behind `SPIKE_STATE` |
+| `rules_changes()`, `summary()` | `lib/eaglegate_rules_audit.py` | What changed between two rule sets, for the audit log |
+| `clean()` | `lib/eaglegate_safe_text.py` | Makes text safe to publish as operator telemetry |
 | `ReviewApp`, `AdminCheck` | `microservices/EAGLEGATE_QUARANTINE/` | The quarantine review service: admin check through COSMOS, listing, review states |
 | `parse_rules()`, `rules_schema()` | `lib/eaglegate_rules_parser.py` | JSON text to `Ruleset` with strict validation. `RULE_TYPES` is the registry of rule types. `rules_schema()` describes the format for the tool page |
 | `RulesStore` | `lib/eaglegate_rules_store.py` | Reads the pending, active and original rules; saves active and history. Never raises on writes |

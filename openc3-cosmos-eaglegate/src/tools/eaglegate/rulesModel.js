@@ -240,6 +240,10 @@ export function validate(doc, schema) {
     }
     if (!type.actions.includes(rule.action))
       errors.push(`${where}.action must be one of ${type.actions.join(', ')}`)
+    if (rule.monitor !== undefined && typeof rule.monitor !== 'boolean')
+      errors.push(`${where}.monitor must be true or false`)
+    else if (rule.monitor === true && rule.action !== 'DENY')
+      errors.push(`${where}.monitor only applies to DENY rules`)
     if (rule.match === undefined)
       errors.push(`${where} is missing 'match' (use {} to match everything)`)
     else checkMatch(rule.match, `${where}.match`, schema, errors)

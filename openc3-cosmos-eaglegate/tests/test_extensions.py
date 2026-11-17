@@ -14,7 +14,7 @@ from eaglegate_firewall_protocol import EaglegateFirewallProtocol
 from eaglegate_match import Match
 from eaglegate_rules_error import RulesError
 from eaglegate_rules_parser import TOP_LEVEL_KEYS, parse_rules, rules_schema
-from eaglegate_spike import DEFAULTS as SPIKE_DEFAULTS
+from eaglegate_ruleset import DEFAULT_SETTINGS
 from eaglegate_verdict import LINK, Verdict
 from eaglegate_test_support import FakeRulesStore, ScriptedInterface
 from openc3.interfaces.protocols.protocol import Protocol
@@ -258,10 +258,10 @@ def test_schema_describes_link_and_settings():
 # ---- settings ----
 
 def test_settings_default_and_parse():
-    assert parse_rules(rules_json([])).settings == {"untrust_on_first_packet_reject": True, **SPIKE_DEFAULTS}
+    assert parse_rules(rules_json([])).settings == DEFAULT_SETTINGS
     parsed = parse_rules(rules_json([], settings={"untrust_on_first_packet_reject": False,
                                                   "spike_window_seconds": "0x1E", "spike_max_fraction": 0.25}))
-    assert parsed.settings == {**SPIKE_DEFAULTS, "untrust_on_first_packet_reject": False,
+    assert parsed.settings == {**DEFAULT_SETTINGS, "untrust_on_first_packet_reject": False,
                                "spike_window_seconds": 30, "spike_max_fraction": 0.25}
 
 
@@ -387,7 +387,7 @@ def test_first_packet_rule_can_be_turned_off():
 def test_details_report_settings():
     iface, _, _ = plain([], {"untrust_on_first_packet_reject": False})
     details = iface.details()["read_protocols"][0]["firewall"]
-    assert details["settings"] == {**SPIKE_DEFAULTS, "untrust_on_first_packet_reject": False}
+    assert details["settings"] == {**DEFAULT_SETTINGS, "untrust_on_first_packet_reject": False}
     assert details["extensions"] == {}
 
 

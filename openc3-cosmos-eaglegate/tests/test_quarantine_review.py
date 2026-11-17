@@ -10,7 +10,7 @@ import urllib.error
 
 import pytest
 from conftest import ROOT, ccsds, status_3
-from eaglegate_quarantine import QUARANTINE_MAXLEN, entry_fields, stream_names
+from eaglegate_quarantine import entry_fields, stream_names
 from eaglegate_verdict import RULE, STRUCTURAL, Verdict
 from fake_store import FakeStore
 
@@ -35,7 +35,6 @@ def store_rejection(store, data, stage=RULE, rule_id="deny-3", detail="no rule a
 def test_key_names_match_the_firewall():
     names = stream_names(SCOPE, IFACE)
     assert {k: K[k] for k in names} == names
-    assert review.MAX_SCAN == QUARANTINE_MAXLEN
 
 
 @pytest.mark.parametrize("text, shown", [

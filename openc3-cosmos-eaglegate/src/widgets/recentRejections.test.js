@@ -119,3 +119,14 @@ test('quarantineFocus reads back only checked values', () => {
     { tab: 'quarantine' },
   )
 })
+
+test('parseRecent keeps the monitor flag only when it is exactly true', () => {
+  const [a, b] = parseRecent(
+    JSON.stringify([
+      { ...ROW, monitor: true },
+      { ...ROW, monitor: 'true' },
+    ]),
+  )
+  assert.equal(a.monitor, true)
+  assert.equal(b.monitor, false)
+})

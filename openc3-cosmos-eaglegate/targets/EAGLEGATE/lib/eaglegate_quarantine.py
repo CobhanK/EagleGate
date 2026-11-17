@@ -43,10 +43,20 @@ from datetime import datetime, timezone
 from eaglegate_ccsds_header import CCSDS_HEADER_BYTES, CcsdsHeader
 from eaglegate_verdict import LINK, UNTRUSTED
 
+# Defaults of the retention settings (rules file settings.quarantine_*, audit_max_entries;
+# decision C14). An admin can change them on the Rules tab.
 QUARANTINE_MAXLEN = 10000    # framed entries kept; ~10 MB at the default 1024-byte max packet
 RAW_MAXLEN = 1000            # raw entries kept
 RAW_CAPTURE_BYTES = 4096     # bytes kept per raw entry, and per untrusted connection
 AUDIT_MAXLEN = 10000         # admin actions kept
+RETENTION_DEFAULTS = {
+    "quarantine_max_entries": QUARANTINE_MAXLEN,
+    "quarantine_raw_max_entries": RAW_MAXLEN,
+    "quarantine_raw_capture_bytes": RAW_CAPTURE_BYTES,
+    "quarantine_max_age_days": 0,   # 0 = no age limit, only the entry counts
+    "audit_max_entries": AUDIT_MAXLEN,
+}
+TRIM_INTERVAL = 60.0         # seconds between age trims (XTRIM MINID) of the two streams
 PAUSE_AFTER_ERROR = 30.0     # seconds to stop trying after a failed write
 
 STATUS_PACKET = "FIREWALL_STATUS"
@@ -90,12 +100,13 @@ def header_of(verdict, data):
     return CcsdsHeader.from_bytes(data)
 
 
-def entry_fields(verdict, data, interface_name, connection_id, time_text, link=None):
+def entry_fields(verdict, data, interface_name, connection_id, time_text, link=None,
+                 raw_capture_bytes=RAW_CAPTURE_BYTES):
     """The stream entry for one rejected packet. Self-contained: the rule's
     description and version are copied in, because the rules file can change
-    after the packet was quarantined. Raw bytes are cut to RAW_CAPTURE_BYTES.
+    after the packet was quarantined. Raw bytes are cut to raw_capture_bytes.
     `link`: what an extension knew about the link (e.g. the virtual channel)."""
-    kept = data if verdict.framed else data[:RAW_CAPTURE_BYTES]
+    kept = data if verdict.framed else data[:raw_capture_bytes]
     fields = {
         "time": time_text,
         "interface": interface_name,
@@ -109,7 +120,8 @@ def entry_fields(verdict, data, interface_name, connection_id, time_text, link=N
         "reason": verdict.reason(),
         "rules_version": "" if verdict.rules_version is None else verdict.rules_version,
         "rules_sha256": verdict.rules_sha256,
-        "releasable": "true" if verdict.framed else "false",
+        "releasable": "true" if verdict.releasable else "false",
+        "monitor": "true" if verdict.monitor else "false",  # delivered; recorded only
         "length": len(data),
         "truncated": "true" if len(kept) < len(data) else "false",
         "sha256": hashlib.sha256(kept).hexdigest(),
@@ -168,6 +180,16 @@ class QuarantineWriter(_Guarded):
         self.written = 0
         self.skipped = 0  # not attempted because writes were paused
         self.audited = 0
+        self.settings = dict(RETENTION_DEFAULTS)  # the running rules' settings (the firewall keeps it current)
+        self.trimmed_at = None  # monotonic time of the last age trim
+        self.trims = 0
+
+    def limit(self, name):
+        return self.settings.get(name, RETENTION_DEFAULTS[name])
+
+    @property
+    def raw_capture_bytes(self):
+        return self.limit("quarantine_raw_capture_bytes")
 
     def record(self, verdict, data, connection_id, time_text, link=None):
         """Store one rejected packet. Returns the stream entry id, or None."""
@@ -175,12 +197,14 @@ class QuarantineWriter(_Guarded):
             self.skipped += 1
             return None
         if verdict.framed:
-            stream, maxlen = self.streams["quarantine"], QUARANTINE_MAXLEN
+            stream, maxlen = self.streams["quarantine"], self.limit("quarantine_max_entries")
         else:
-            stream, maxlen = self.streams["raw"], RAW_MAXLEN
+            stream, maxlen = self.streams["raw"], self.limit("quarantine_raw_max_entries")
         try:
-            fields = entry_fields(verdict, data, self.interface_name, connection_id, time_text, link)
+            fields = entry_fields(verdict, data, self.interface_name, connection_id, time_text, link,
+                                  self.raw_capture_bytes)
             entry_id = self._write(stream, fields, maxlen)
+            self._trim_by_age()
         except Exception as error:
             self._failed(error)
             return None
@@ -193,12 +217,26 @@ class QuarantineWriter(_Guarded):
         matters more. Returns the entry id, or None."""
         try:
             entry = {"interface": self.interface_name, **{k: _stream_value(v) for k, v in fields.items()}}
-            entry_id = self._write(self.streams["audit"], entry, AUDIT_MAXLEN)
+            entry_id = self._write(self.streams["audit"], entry, self.limit("audit_max_entries"))
         except Exception as error:
             self._failed(error)
             return None
         self.audited += 1
         return entry_id.decode() if isinstance(entry_id, bytes) else str(entry_id)
+
+    def _trim_by_age(self, now=None, wall=None):
+        """With quarantine_max_age_days set, drop entries older than that from both
+        streams (XTRIM MINID ~), at most once per TRIM_INTERVAL. The audit
+        stream is only capped by count: it is the record of what admins did."""
+        days = self.limit("quarantine_max_age_days")
+        now = time.monotonic() if now is None else now
+        if not days or (self.trimmed_at is not None and now - self.trimmed_at < TRIM_INTERVAL):
+            return
+        self.trimmed_at = now
+        cutoff_ms = int(((time.time() if wall is None else wall) - days * 86400) * 1000)
+        for name in ("quarantine", "raw"):
+            self._trim(self.streams[name], f"{max(cutoff_ms, 0)}-0")
+        self.trims += 1
 
     # ---- release (eaglegate_release.py); these may raise, the caller reports it ----
 
@@ -234,6 +272,11 @@ class QuarantineWriter(_Guarded):
 
         return Store.instance().write_topic(stream, fields, maxlen=maxlen, approximate=True)
 
+    def _trim(self, stream, minid):
+        from openc3.utilities.store import Store
+
+        return Store.instance().trim_topic(stream, minid, approximate=True)
+
     def _range(self, stream, entry_id):
         from openc3.utilities.store import Store
 
@@ -260,6 +303,8 @@ class QuarantineWriter(_Guarded):
                         "audit": self.streams["audit"], "review": self.streams["review"],
                         "released": self.streams["released"]},
             "audited": self.audited,
+            "retention": {name: self.limit(name) for name in RETENTION_DEFAULTS},
+            "age_trims": self.trims,
             "written": self.written,
             "errors": self.errors,
             "skipped": self.skipped,
@@ -331,6 +376,7 @@ def recent_items(rejections):
             "stage": clean(r.get("stage"), 12),
             "rule_id": clean(r.get("rule_id") or "", 64),
             "rule_type": clean(r.get("rule_type") or "", 32),
+            "monitor": bool(r.get("monitor")),
             "layer": clean(r.get("layer") or "", 32),
             "apid": clean(r.get("apid") or "", 8),
             "packet_type": clean(r.get("packet_type") or "", 3),

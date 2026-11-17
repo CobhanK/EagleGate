@@ -23,6 +23,7 @@ keeps the two in step):
 """
 import json
 import re
+import struct
 from datetime import datetime, timezone
 
 STREAMS = ("quarantine", "raw")
@@ -34,11 +35,14 @@ REVIEW_FILTERS = REVIEW_STATES + ("released",)
 
 DEFAULT_LIMIT = 50
 MAX_LIMIT = 1000
+MAX_EXPORT = 10000       # entries one export may hold
+EXPORT_FORMATS = ("json", "pcap")
+PCAP_LINKTYPE = 147      # LINKTYPE_USER0: CCSDS packets have no registered link type
+PCAP_SNAPLEN = 262144
 SCAN_BATCH = 500
-MAX_SCAN = 10000         # the framed stream's cap (QUARANTINE_MAXLEN): one request may read it all
+MAX_SCAN = 10000         # entries one request reads at most; "Load older" (next_before) continues
 MAX_REVIEW_IDS = 200     # entries one review request may change
 REVIEW_KEEP = 25000      # review hash fields kept before pruning those of trimmed entries
-AUDIT_MAXLEN = 10000
 TEXT_CHARS = 512         # most characters of one text field sent to the page
 REASON_CHARS = 1024
 NOTE_CHARS = 256
@@ -144,6 +148,7 @@ def summary(entry_id, fields, stream, review=None, released=None):
     view["length"] = _int(fields, "length")
     view["seq_count"] = _int(fields, "seq_count")
     view["releasable"] = _str(fields, "releasable") == "true" and stream == "quarantine"
+    view["monitor"] = _str(fields, "monitor") == "true"  # delivered in monitor mode; recorded only
     view["truncated"] = _str(fields, "truncated") == "true"
     link = _json_or_none(fields.get("link"))
     view["link"] = clean_json(link) if link else None
@@ -200,7 +205,7 @@ def entry_id_param(value, what="id"):
     return value
 
 
-def list_query(params):
+def list_query(params, max_limit=MAX_LIMIT):
     """Checked list filters from the query string (a dict of strings)."""
     def get(name):
         return (params.get(name) or "").strip()
@@ -209,8 +214,8 @@ def list_query(params):
         limit = int(get("limit") or DEFAULT_LIMIT)
     except ValueError:
         raise QueryError("limit must be a whole number") from None
-    if not 1 <= limit <= MAX_LIMIT:
-        raise QueryError(f"limit must be 1 to {MAX_LIMIT}")
+    if not 1 <= limit <= max_limit:
+        raise QueryError(f"limit must be 1 to {max_limit}")
     query = {"limit": limit, "stream": stream_param(get("stream"))}
     stage = get("stage").upper()
     if stage and stage not in STAGES:
@@ -282,15 +287,16 @@ def _hmget(store, key, fields):
     return dict(zip(fields, store.hmget(key, fields))) if fields else {}
 
 
-def list_entries(store, k, query):
+def list_entries(store, k, query, build=summary, max_scan=MAX_SCAN):
     """The newest `limit` entries of one stream that match the filters, newest
-    first. Reads back from `before` (exclusive) in batches, at most MAX_SCAN
-    entries per request. `next_before` continues an unfinished scan."""
+    first. Reads back from `before` (exclusive) in batches, at most max_scan
+    entries per request. `next_before` continues an unfinished scan.
+    build: summary (the list) or detail (with bytes, for exports)."""
     stream = query["stream"]
     upper = f"({query['before']}" if query["before"] else "+"
     found, scanned, last_id, exhausted = [], 0, None, False
-    while len(found) < query["limit"] and scanned < MAX_SCAN:
-        requested = min(SCAN_BATCH, MAX_SCAN - scanned)
+    while len(found) < query["limit"] and scanned < max_scan:
+        requested = min(SCAN_BATCH, max_scan - scanned)
         batch = store.xrevrange(k[stream], upper, "-", count=requested)
         if not batch:
             exhausted = True
@@ -301,7 +307,7 @@ def list_entries(store, k, query):
         for entry_id, (_, fields) in zip(ids, batch):
             scanned += 1
             last_id = entry_id
-            view = summary(entry_id, fields, stream, reviews.get(f"{stream}:{entry_id}"), released.get(entry_id))
+            view = build(entry_id, fields, stream, reviews.get(f"{stream}:{entry_id}"), released.get(entry_id))
             if matches(view, query):
                 found.append(view)
                 if len(found) == query["limit"]:
@@ -353,7 +359,9 @@ def set_review(store, k, interface, stream, ids, state, note, user, requested_by
         "entry_ids": json.dumps(present[:50]), "count": len(present),
         "detail": f"{len(present)} {stream} entr{'y' if len(present) == 1 else 'ies'} set to {state}",
     }
-    audit_id = store.xadd(k["audit"], audit, maxlen=AUDIT_MAXLEN, approximate=True)
+    # No MAXLEN here: the audit cap is the rules setting audit_max_entries, which only
+    # the firewall knows; it trims the stream on its next audit write
+    audit_id = store.xadd(k["audit"], audit)
     prune_reviews(store, k)
     return {"updated": present, "missing": missing,
             "audit_id": audit_id.decode() if isinstance(audit_id, bytes) else audit_id}
@@ -382,3 +390,63 @@ def prune_reviews(store, k):
 def _id_tuple(entry_id):
     ms, _, seq = entry_id.partition("-")
     return int(ms), int(seq or 0)
+
+
+# ---- exporting (decision C14) --------------------------------------------------
+
+def export_query(params):
+    """Checked export request: the list filters (limit up to MAX_EXPORT) and a format."""
+    query = list_query(params, max_limit=MAX_EXPORT)
+    fmt = (params.get("format") or "json").strip().lower()
+    if fmt not in EXPORT_FORMATS:
+        raise QueryError(f"format must be one of {', '.join(EXPORT_FORMATS)}")
+    return query, fmt
+
+
+def export_entries(store, k, query):
+    """The matching entries with their bytes (hex), newest first; reads as far
+    back as needed for `limit` matches, up to the stream's length."""
+    return list_entries(store, k, query, build=detail, max_scan=max(MAX_SCAN, store.xlen(k[query["stream"]])))
+
+
+def export_json(entries, meta):
+    """One JSON document: who exported what, then the entries (text already clean)."""
+    doc = {"format": "eaglegate-quarantine-export", "format_version": 1, **meta,
+           "count": len(entries), "entries": entries}
+    return json.dumps(doc, ensure_ascii=True, indent=1).encode("ascii")
+
+
+def _epoch(entry):
+    """(seconds, microseconds) of an entry: its time field, else its stream id."""
+    try:
+        when = datetime.strptime(entry["time"], "%Y-%m-%dT%H:%M:%S.%fZ").replace(tzinfo=timezone.utc)
+        stamp = when.timestamp()
+    except (KeyError, TypeError, ValueError):
+        stamp = _id_tuple(entry["id"])[0] / 1000.0
+    seconds = int(stamp)
+    return seconds, round((stamp - seconds) * 1e6) % 1000000
+
+
+def export_pcap(entries):
+    """A classic libpcap file (microsecond timestamps), oldest packet first.
+    Link type USER0: in Wireshark, Preferences > Protocols > DLT_USER, map
+    User 0 (DLT=147) to the "ccsds" dissector. Truncated raw entries keep
+    their original length, as pcap does for a short snaplen."""
+    out = bytearray(struct.pack("<IHHiIII", 0xA1B2C3D4, 2, 4, 0, 0, PCAP_SNAPLEN, PCAP_LINKTYPE))
+    for entry in reversed(entries):
+        data = bytes.fromhex(entry.get("bytes_hex") or "")
+        seconds, micros = _epoch(entry)
+        length = entry.get("length")
+        original = length if isinstance(length, int) and length >= len(data) else len(data)
+        out += struct.pack("<IIII", seconds, micros, len(data), original) + data
+    return bytes(out)
+
+
+def audit_export(store, k, interface, stream, fmt, count, query, user):
+    """Exports take packet bytes out of COSMOS: record who took what."""
+    filters = {key: value for key, value in query.items() if value not in ("", None)}
+    audit = {"time": utc_now(), "action": "EXPORT", "ok": "true", "interface": interface, "stream": stream,
+             "format": fmt, "count": count, "filters": json.dumps(filters, sort_keys=True), "user": user,
+             "detail": f"exported {count} {stream} entr{'y' if count == 1 else 'ies'} as {fmt}"}
+    audit_id = store.xadd(k["audit"], audit)
+    return audit_id.decode() if isinstance(audit_id, bytes) else audit_id

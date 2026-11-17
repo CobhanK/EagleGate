@@ -8,7 +8,11 @@ Authorization header every COSMOS API call carries.
   GET  /eaglegate-quarantine/health                     no login; says only that it is up
   GET  /eaglegate-quarantine/entries?interface=&stream=&limit=&stage=&rule_id=&apid=&review=&search=&before=
   GET  /eaglegate-quarantine/entry?interface=&stream=&id=
+  GET  /eaglegate-quarantine/export?interface=&stream=&format=json|pcap&limit=&<the list filters>
   POST /eaglegate-quarantine/review   {"interface", "stream", "ids", "state", "note", "requested_by"}
+
+An export is a file download (JSON with every field and the bytes as hex, or
+pcap) of up to 10000 matching entries, and is written to the audit stream.
 
 Releasing is NOT done here: it goes through the firewall (RELEASE, see
 targets/EAGLEGATE/lib/eaglegate_release.py), which owns the interface.
@@ -25,6 +29,7 @@ In COSMOS Core every logged in user is an admin (R5 in DECISIONS.md).
 Standard library only.
 """
 import base64
+import collections
 import hashlib
 import json
 import os
@@ -44,6 +49,10 @@ MAX_BODY = 64 * 1024
 ADMIN_CACHE_SECONDS = 30
 ADMIN_CACHE_SIZE = 256
 COSMOS_TIMEOUT = 5.0
+
+
+# A file answer (an export) instead of a JSON payload
+Download = collections.namedtuple("Download", "body content_type filename")
 
 
 class HttpError(Exception):
@@ -155,7 +164,7 @@ class ReviewApp:
         params = {k: v[0] for k, v in urllib.parse.parse_qs(parsed.query, keep_blank_values=True).items()}
         if path == "/health" and method == "GET":
             return {"ok": True}
-        routes = {("GET", "/entries"), ("GET", "/entry"), ("POST", "/review")}
+        routes = {("GET", "/entries"), ("GET", "/entry"), ("GET", "/export"), ("POST", "/review")}
         if (method, path) not in routes:
             if any(p == path for _, p in routes):
                 raise HttpError(405, f"{method} is not allowed here")
@@ -176,12 +185,32 @@ class ReviewApp:
         if path == "/entries":
             result = review.list_entries(store, k, review.list_query(params))
             return {"interface": interface, **result}
+        if path == "/export":
+            return self._export(store, k, scope, interface, params, user)
         stream = review.stream_param(params.get("stream"))
         entry_id = review.entry_id_param(params.get("id", ""))
         entry = review.get_entry(store, k, stream, entry_id)
         if entry is None:
             raise HttpError(404, f"entry {entry_id} is not in the {stream} stream (it may have been trimmed)")
         return {"interface": interface, "entry": entry}
+
+    @staticmethod
+    def _export(store, k, scope, interface, params, user):
+        query, fmt = review.export_query(params)
+        result = review.export_entries(store, k, query)
+        entries = result["entries"]
+        stamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+        audit_id = review.audit_export(store, k, interface, query["stream"], fmt, len(entries), query, user)
+        filename = f"eaglegate-{interface}-{query['stream']}-{stamp}.{fmt}"
+        if fmt == "pcap":
+            return Download(review.export_pcap(entries), "application/vnd.tcpdump.pcap", filename)
+        meta = {"exported_at": review.utc_now(), "exported_by": user, "scope": scope, "interface": interface,
+                "stream": query["stream"], "audit_id": audit_id,
+                "filters": {key: value for key, value in query.items() if value not in ("", None)},
+                "complete": result["next_before"] is None,
+                "note": "packet bytes are hex; text fields are cleaned (control and invisible "
+                        "characters escaped). Handle this file as sensitive."}
+        return Download(review.export_json(entries, meta), "application/json", filename)
 
     @staticmethod
     def _json_body(headers, body):
@@ -216,9 +245,16 @@ class Handler(BaseHTTPRequestHandler):
         self._send(status, payload)
 
     def _send(self, status, payload):
-        data = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+        if isinstance(payload, Download):
+            data, content_type = payload.body, payload.content_type
+        else:
+            data = json.dumps(payload, ensure_ascii=True, separators=(",", ":")).encode("ascii")
+            content_type = "application/json; charset=utf-8"
         self.send_response(status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", content_type)
+        if isinstance(payload, Download):
+            # The name is built from checked parts only (interface, stream, time, format)
+            self.send_header("Content-Disposition", f'attachment; filename="{payload.filename}"')
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")

@@ -17,6 +17,8 @@ Rules file format (JSON):
       "type": "match",                # optional, default "match"; see RULE_TYPES below
       "action": "ALLOW",              # required: ALLOW or DENY (check types: DENY only)
       "enabled": true,                # optional, default true
+      "monitor": false,               # optional, DENY rules only: true = record a would-be
+                                      # denial and let the rules below decide (rollout)
       "description": "...",           # optional
       "match": {                      # required; which packets the rule applies to.
         "apid": [2, "0x003"],               # ALL listed conditions must hold
@@ -57,7 +59,7 @@ from eaglegate_validate import no_unknown_keys, require, to_int, to_number
 RULE_TYPES = {cls.TYPE: cls for cls in (MatchRule, RangeRule, SequenceRule, RateRule, AuthenticityRule, TextRule)}
 ACTIONS = ("ALLOW", "DENY")
 TOP_LEVEL_KEYS = {"version", "description", "default_action", "settings", "rules"}
-RULE_KEYS = {"id", "type", "action", "enabled", "description", "match", "params"}
+RULE_KEYS = {"id", "type", "action", "enabled", "monitor", "description", "match", "params"}
 MAX_RULES = 500          # bounds the work done per packet
 
 # The "settings" object: firewall behaviour an admin may change. Defaults in
@@ -72,6 +74,43 @@ SETTINGS_SCHEMA = {
                 "behind an extension that already checks the sender, such as the SDLS frame layer",
     },
     # Spike warning (eaglegate_spike.py; decision C11)
+    "enforcement": {
+        "type": "enum", "values": ["enforce", "monitor"], "default": DEFAULT_SETTINGS["enforcement"],
+        "title": "Enforcement",
+        "value_help": {"enforce": "denied packets are withheld",
+                       "monitor": "nothing is withheld; would-be denials are only recorded"},
+        "help": "monitor: try a new rule set without losing telemetry. Every packet the rules would "
+                "deny is delivered, quarantined (not releasable) and counted as MONITORED, and "
+                "FIREWALL_STATUS ENFORCEMENT turns yellow. The hardcoded structural check and an "
+                "extension's own checks still apply. A single rule can be monitored with \"monitor\": true",
+    },
+    # Retention (eaglegate_quarantine.py; decision C14)
+    "quarantine_max_entries": {
+        "type": "int", "min": 100, "max": 100000, "default": DEFAULT_SETTINGS["quarantine_max_entries"],
+        "title": "Quarantine: rule denials kept",
+        "help": "newest entries kept in the framed (releasable) stream; each holds the whole packet "
+                "(up to the size ceiling), so 100000 can take about 100 MB of Valkey memory",
+    },
+    "quarantine_raw_max_entries": {
+        "type": "int", "min": 100, "max": 100000, "default": DEFAULT_SETTINGS["quarantine_raw_max_entries"],
+        "title": "Quarantine: raw and link rejections kept",
+        "help": "newest entries kept in the raw stream (bad headers, untrusted connections, link layer)",
+    },
+    "quarantine_raw_capture_bytes": {
+        "type": "int", "min": 256, "max": 65536, "default": DEFAULT_SETTINGS["quarantine_raw_capture_bytes"],
+        "title": "Quarantine: bytes kept per raw entry",
+        "help": "also the evidence kept per untrusted connection",
+    },
+    "quarantine_max_age_days": {
+        "type": "int", "min": 0, "max": 3650, "default": DEFAULT_SETTINGS["quarantine_max_age_days"],
+        "title": "Quarantine: maximum age (days)",
+        "help": "0 = no age limit (only the counts above). Older entries are dropped about once a minute",
+    },
+    "audit_max_entries": {
+        "type": "int", "min": 1000, "max": 1000000, "default": DEFAULT_SETTINGS["audit_max_entries"],
+        "title": "Audit log entries kept",
+        "help": "admin actions, rule changes, releases, reviews, exports and spikes; never trimmed by age",
+    },
     "spike_detection": {
         "type": "bool", "default": DEFAULT_SETTINGS["spike_detection"],
         "title": "Warn when rejections spike",
@@ -184,6 +223,9 @@ def _setting(spec, value, where):
     if spec["type"] == "bool":
         require(isinstance(value, bool), f"{where} must be true or false")
         return value
+    if spec["type"] == "enum":
+        require(value in spec["values"], f"{where} must be one of {spec['values']}, got {value!r}")
+        return value
     if spec["type"] == "int":
         return to_int(value, where, spec["min"], spec["max"])
     value = to_number(value, where)
@@ -212,6 +254,9 @@ def _parse_rule(raw, where, link_keys=None):
 
     enabled = raw.get("enabled", True)
     require(isinstance(enabled, bool), f"{where}.enabled must be true or false")
+    monitor = raw.get("monitor", False)
+    require(isinstance(monitor, bool), f"{where}.monitor must be true or false")
+    require(not monitor or action == "DENY", f"{where}.monitor only applies to DENY rules")
     description = raw.get("description", "")
     require(isinstance(description, str), f"{where}.description must be a string")
     require("match" in raw, f"{where} is missing 'match' (use {{}} to match everything)")
@@ -224,7 +269,8 @@ def _parse_rule(raw, where, link_keys=None):
         return rule_id, None
 
     settings = rule_class.parse_params(params, f"{where}.params")
-    return rule_id, rule_class(id=rule_id, action=action, match=match, description=description, **settings)
+    return rule_id, rule_class(id=rule_id, action=action, match=match, description=description, monitor=monitor,
+                               **settings)
 
 
 def _action(value, allowed, where):

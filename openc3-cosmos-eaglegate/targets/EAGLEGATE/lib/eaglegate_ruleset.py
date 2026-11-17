@@ -1,8 +1,9 @@
 """The active rule set: an ordered list of rules plus a default action."""
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from eaglegate_ccsds_header import CcsdsHeader
+from eaglegate_quarantine import RETENTION_DEFAULTS
 from eaglegate_spike import DEFAULTS as SPIKE_DEFAULTS
 from eaglegate_verdict import DEFAULT, RULE, Verdict
 
@@ -11,8 +12,13 @@ DEFAULT_SETTINGS = {
     # If a connection's FIRST packet is rejected, discard everything after it
     # until the interface reconnects or an admin restores trust
     "untrust_on_first_packet_reject": True,
+    # "enforce": denied packets are withheld. "monitor": nothing is withheld; every
+    # would-be denial is recorded (quarantined as not releasable) to try rules safely
+    "enforcement": "enforce",
     # Spike warning (eaglegate_spike.py): alarm when rejections jump above normal
     **SPIKE_DEFAULTS,
+    # How much of the quarantine is kept (eaglegate_quarantine.py)
+    **RETENTION_DEFAULTS,
 }
 
 
@@ -38,17 +44,24 @@ class Ruleset:
         arrived on (eaglegate_extensions.py), or None."""
         header = CcsdsHeader.from_bytes(packet)
         now = time.monotonic() if now is None else now
-        passed = []  # rules that applied to this packet but did not fire
+        passed = []    # rules that applied to this packet but did not fire
+        observed = []  # monitored rules that fired: would-be denials, recorded only
         for rule in self.rules:
             if not rule.match.holds(header, packet, link):
                 continue
             detail = rule.fires(header, packet, now)
             if detail is not None:
                 rule.hits += 1
-                return self._decide(passed, header, now, Verdict(
+                verdict = Verdict(
                     action=rule.action, stage=RULE, detail=detail, rule_id=rule.id,
                     rule_type=rule.TYPE, rule_description=rule.description,
-                    rules_version=self.version, rules_sha256=self.sha256))
+                    rules_version=self.version, rules_sha256=self.sha256, monitor=rule.monitor)
+                if rule.monitor:
+                    # Not in `passed`: like an enforced denial, it must not teach a
+                    # stateful rule anything. The rules below decide the packet
+                    observed.append(verdict)
+                    continue
+                return self._decide(passed, header, now, replace(verdict, observed=tuple(observed)))
             passed.append(rule)
         self.default_hits += 1
         if self.version < 0:
@@ -57,7 +70,7 @@ class Ruleset:
             detail = f"no rule fired; default action {self.default_action}"
         return self._decide(passed, header, now, Verdict(
             action=self.default_action, stage=DEFAULT, detail=detail,
-            rules_version=self.version, rules_sha256=self.sha256))
+            rules_version=self.version, rules_sha256=self.sha256, observed=tuple(observed)))
 
     @staticmethod
     def _decide(passed, header, now, verdict):
@@ -76,6 +89,7 @@ class Ruleset:
             "rule_count": len(self.rules),
             "rule_types": {rule.id: rule.TYPE for rule in self.rules},
             "rule_hits": {rule.id: rule.hits for rule in self.rules},
+            "monitor_rules": [rule.id for rule in self.rules if rule.monitor],
             "default_hits": self.default_hits,
             "settings": dict(self.settings),
             "extension_sections": sorted(self.extensions),

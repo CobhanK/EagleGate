@@ -86,7 +86,8 @@ def test_release_is_audited(store):
     _, fw, rules, _ = firewall([status_3()])
     entry_id, _ = only_entry(store)
     fw.protocol_cmd("RELEASE", request_release(rules, entry_id, hashlib.sha256(status_3()).hexdigest()))
-    [audit] = [f for _, f in store.streams["DEFAULT__EAGLEGATE__QUARANTINE_AUDIT__EAGLEGATE_INT"]]
+    [audit] = [f for _, f in store.streams["DEFAULT__EAGLEGATE__QUARANTINE_AUDIT__EAGLEGATE_INT"]
+               if f[b"action"] == b"RELEASE"]
     assert audit[b"action"] == b"RELEASE" and audit[b"ok"] == b"true" and audit[b"entry_id"] == entry_id.encode()
 
 

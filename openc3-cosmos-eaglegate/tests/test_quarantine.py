@@ -168,7 +168,8 @@ def test_valkey_outage_never_changes_decisions(valkey, monkeypatch):
     assert apids(read_all(iface)) == [2, 3]
     assert proto.rejected == 2
     summary = proto.quarantine.summary()
-    assert (summary["written"], summary["errors"], summary["skipped"]) == (0, 1, 1)  # paused after one
+    # The start-up LOAD_RULES audit write fails and pauses writes: both rejections are skipped
+    assert (summary["written"], summary["errors"], summary["skipped"]) == (0, 1, 2)
     assert "valkey down" in summary["last_error"]
     assert proto.last_rejection["entry_id"] is None
 

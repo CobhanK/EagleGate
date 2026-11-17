@@ -59,6 +59,15 @@
               <v-chip size="x-small" :color="stageColor(row.stage)">{{
                 row.stage || '-'
               }}</v-chip>
+              <v-chip
+                v-if="row.monitor"
+                size="x-small"
+                variant="outlined"
+                color="warning"
+                style="margin-left: 2px"
+                title="Monitor mode: delivered, only recorded"
+                >monitor</v-chip
+              >
             </td>
             <td :style="cellStyle" :title="row.link">
               {{ packetLabel(row) }}

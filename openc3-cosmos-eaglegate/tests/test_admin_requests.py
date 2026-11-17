@@ -131,7 +131,7 @@ def test_restore_trust_resumes_the_same_connection(valkey, log):
     assert not fw.connection_untrusted  # a later rejection affects only its own packet
 
     assert "restore_trust" not in store.requests  # consumed
-    [audit] = valkey.stream("_AUDIT__EAGLEGATE_INT")
+    [audit] = valkey.audit("RESTORE_TRUST")
     assert (audit["action"], audit["ok"], audit["reason"]) == ("RESTORE_TRUST", "true",
                                                               "first packet was a stale buffer")
     assert audit["request_sha256"] == sha and "its first packet was rejected" in audit["previous_cause"]
@@ -147,7 +147,7 @@ def test_restore_trust_without_an_uploaded_request_is_refused(valkey):
     assert fw.connection_untrusted
     action = fw.admin_actions[-1]
     assert action["ok"] is False and "no restore_trust request" in action["detail"]
-    [audit] = valkey.stream("_AUDIT__EAGLEGATE_INT")
+    [audit] = valkey.audit("RESTORE_TRUST")
     assert audit["ok"] == "false"
 
 

@@ -27,10 +27,17 @@ class Verdict:
     rules_version: int = None    # the rule set that was active
     rules_sha256: str = ""
     layer: str = ""              # LINK stage: which layer of the extension decided, e.g. "frame"
+    monitor: bool = False        # monitor mode: this DENY was only recorded; the packet was delivered
+    observed: tuple = ()         # would-be denials of monitored rules seen on the way (Verdicts, monitor=True)
 
     @property
     def framed(self):
         return self.stage in FRAMED_STAGES
+
+    @property
+    def releasable(self):
+        """Could be released later: a whole packet that was really withheld."""
+        return self.framed and not self.monitor
 
     def reason(self):
         """One line for logs and operator displays."""
@@ -42,4 +49,5 @@ class Verdict:
             who = f"link layer '{self.layer}'" if self.layer else "link layer"
         else:
             who = self.stage.lower()
-        return f"{self.action} by {who}: {self.detail} (rules v{self.rules_version})"
+        verb = f"WOULD {self.action} (monitor)" if self.monitor else self.action
+        return f"{verb} by {who}: {self.detail} (rules v{self.rules_version})"

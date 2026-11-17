@@ -361,3 +361,43 @@ test('spike settings are validated like the firewall does', () => {
   assert.equal(d.settings, undefined)
   assert.equal(settingValue(d, schema, 'spike_ceiling'), 100)
 })
+
+test('monitor is a DENY-only true/false flag, like the firewall checks', () => {
+  const rule = (extra) => ({
+    version: 1,
+    default_action: 'DENY',
+    rules: [{ id: 'r', action: 'DENY', match: {}, ...extra }],
+  })
+  assert.deepEqual(validate(rule({ monitor: true }), schema), [])
+  assert.match(
+    validate(rule({ monitor: 'yes' }), schema).join(),
+    /monitor must be true or false/,
+  )
+  assert.match(
+    validate(rule({ action: 'ALLOW', monitor: true }), schema).join(),
+    /monitor only applies to DENY rules/,
+  )
+  assert.deepEqual(
+    validate(
+      {
+        version: 1,
+        default_action: 'DENY',
+        rules: [],
+        settings: { enforcement: 'monitor' },
+      },
+      schema,
+    ),
+    [],
+  )
+  assert.ok(
+    validate(
+      {
+        version: 1,
+        default_action: 'DENY',
+        rules: [],
+        settings: { enforcement: 'off' },
+      },
+      schema,
+    ).length,
+  )
+})

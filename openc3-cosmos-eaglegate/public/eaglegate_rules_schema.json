@@ -83,6 +83,7 @@
     "enabled",
     "id",
     "match",
+    "monitor",
     "params",
     "type"
   ],
@@ -504,6 +505,60 @@
     }
   },
   "settings": {
+    "audit_max_entries": {
+      "default": 10000,
+      "help": "admin actions, rule changes, releases, reviews, exports and spikes; never trimmed by age",
+      "max": 1000000,
+      "min": 1000,
+      "title": "Audit log entries kept",
+      "type": "int"
+    },
+    "enforcement": {
+      "default": "enforce",
+      "help": "monitor: try a new rule set without losing telemetry. Every packet the rules would deny is delivered, quarantined (not releasable) and counted as MONITORED, and FIREWALL_STATUS ENFORCEMENT turns yellow. The hardcoded structural check and an extension's own checks still apply. A single rule can be monitored with \"monitor\": true",
+      "title": "Enforcement",
+      "type": "enum",
+      "value_help": {
+        "enforce": "denied packets are withheld",
+        "monitor": "nothing is withheld; would-be denials are only recorded"
+      },
+      "values": [
+        "enforce",
+        "monitor"
+      ]
+    },
+    "quarantine_max_age_days": {
+      "default": 0,
+      "help": "0 = no age limit (only the counts above). Older entries are dropped about once a minute",
+      "max": 3650,
+      "min": 0,
+      "title": "Quarantine: maximum age (days)",
+      "type": "int"
+    },
+    "quarantine_max_entries": {
+      "default": 10000,
+      "help": "newest entries kept in the framed (releasable) stream; each holds the whole packet (up to the size ceiling), so 100000 can take about 100 MB of Valkey memory",
+      "max": 100000,
+      "min": 100,
+      "title": "Quarantine: rule denials kept",
+      "type": "int"
+    },
+    "quarantine_raw_capture_bytes": {
+      "default": 4096,
+      "help": "also the evidence kept per untrusted connection",
+      "max": 65536,
+      "min": 256,
+      "title": "Quarantine: bytes kept per raw entry",
+      "type": "int"
+    },
+    "quarantine_raw_max_entries": {
+      "default": 1000,
+      "help": "newest entries kept in the raw stream (bad headers, untrusted connections, link layer)",
+      "max": 100000,
+      "min": 100,
+      "title": "Quarantine: raw and link rejections kept",
+      "type": "int"
+    },
     "spike_ceiling": {
       "default": 100,
       "help": "this many rejections in one window is always a SPIKE, whatever is normal",

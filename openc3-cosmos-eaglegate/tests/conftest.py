@@ -29,7 +29,8 @@ class FakeValkey:
     """Records what the quarantine writer and status publisher would send to COSMOS."""
 
     def __init__(self):
-        self.entries = []   # (stream, fields, maxlen)
+        self.entries = []   # (stream, fields, maxlen) of the quarantine streams
+        self.audits = []    # (stream, fields, maxlen) of the audit stream
         self.status = []    # item_hash of each FIREWALL_STATUS packet
         self.recent = []    # item_hash of each FIREWALL_RECENT packet
         self.fail = False   # make every write raise, like a Valkey outage
@@ -37,8 +38,9 @@ class FakeValkey:
     def write(self, writer, stream, fields, maxlen):
         if self.fail:
             raise ConnectionError("valkey down")
-        self.entries.append((stream, fields, maxlen))
-        return f"{len(self.entries)}-0".encode()
+        target = self.audits if "_AUDIT__" in stream else self.entries
+        target.append((stream, fields, maxlen))
+        return f"{len(target)}-0".encode()
 
     def inject(self, publisher, message_json):
         if self.fail:
@@ -50,7 +52,11 @@ class FakeValkey:
 
     def stream(self, suffix):
         """Field dicts written to the stream whose name ends with suffix."""
-        return [fields for stream, fields, _ in self.entries if stream.endswith(suffix)]
+        return [fields for stream, fields, _ in self.entries + self.audits if stream.endswith(suffix)]
+
+    def audit(self, action):
+        """Audit entries of one action (every interface start also audits LOAD_RULES)."""
+        return [fields for _, fields, _ in self.audits if fields.get("action") == action]
 
 
 @pytest.fixture(autouse=True)

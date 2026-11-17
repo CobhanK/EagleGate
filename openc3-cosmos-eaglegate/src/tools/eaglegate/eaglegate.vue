@@ -86,6 +86,18 @@
         <v-btn variant="text" @click="openTrustDialog">Restore trust…</v-btn>
       </template>
     </v-alert>
+    <v-alert
+      v-if="state?.settings?.enforcement === 'monitor'"
+      type="warning"
+      variant="tonal"
+      density="compact"
+      class="ma-2"
+    >
+      Monitor mode: {{ interfaceName }}'s firewall is delivering every packet
+      and only recording what its rules would deny (Quarantine tab, "WOULD
+      DENY"). The structural header check still applies. Set Enforcement to
+      enforce in the rules' settings to block again.
+    </v-alert>
     <v-tabs v-model="tab" class="mx-2" color="primary">
       <v-tab value="rules">Rules</v-tab>
       <v-tab value="link">Link status</v-tab>
@@ -384,6 +396,15 @@
                   >
                     {{ rule.action }}
                   </v-chip>
+                  <v-chip
+                    v-if="rule.monitor === true"
+                    size="small"
+                    variant="outlined"
+                    color="warning"
+                    class="ml-1"
+                    title="Only records its denials; the rules below decide"
+                    >monitor</v-chip
+                  >
                 </td>
                 <td class="text-caption">{{ matchSummary(rule.match) }}</td>
                 <td class="text-right">{{ hits(rule.id) }}</td>
@@ -532,6 +553,27 @@
               {{ warning }}
             </div>
           </v-alert>
+          <v-textarea
+            v-model="changeReason"
+            label="Reason for this change (kept in the audit log)"
+            :error-messages="
+              changeReason ? reasonProblem(changeReason) || [] : []
+            "
+            counter="256"
+            rows="1"
+            auto-grow
+            class="mb-2"
+          />
+          <v-alert
+            v-if="toApply && toApply.doc.settings?.enforcement === 'monitor'"
+            type="warning"
+            variant="tonal"
+            density="compact"
+            class="mb-2"
+          >
+            These rules are in monitor mode: the firewall will deliver every
+            packet and only record what it would deny.
+          </v-alert>
           <pre class="diff"><span
             v-for="(row, i) in shownDiffRows"
             :key="i"
@@ -549,6 +591,7 @@
             color="primary"
             variant="flat"
             :loading="applying"
+            :disabled="!!reasonProblem(changeReason)"
             @click="apply"
             >Apply</v-btn
           >
@@ -704,6 +747,7 @@ export default {
       reviewing: false,
       applying: false,
       toApply: null,
+      changeReason: '', // why the rules change: goes to the audit log with the apply
       history: { open: false, items: [] },
       trust: { open: false, reason: '', busy: false },
       tab: 'rules',
@@ -1089,6 +1133,7 @@ export default {
       const doc = withBumpedVersion(this.doc, this.state.rules.version)
       this.toApply = { doc, text: toFileText(doc) }
       this.fullDiff = false
+      this.changeReason = ''
       this.reviewing = true
     },
     async apply() {
@@ -1098,6 +1143,7 @@ export default {
           this.interfaceName,
           this.toApply.text,
           this.baseSha256,
+          this.changeReason,
         )
         this.state = state
         this.baseSha256 = state.rules.sha256

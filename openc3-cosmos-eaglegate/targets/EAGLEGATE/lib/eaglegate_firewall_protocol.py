@@ -93,14 +93,16 @@ afterwards in the interface microservice.
 import threading
 import time
 from collections import deque
+from dataclasses import replace
 
 from eaglegate_admin_requests import NonceLog, RequestError, parse_request
 from eaglegate_ccsds_header import CCSDS_HEADER_BYTES, CcsdsHeader
 from eaglegate_extensions import FIREWALL_API_VERSION, collect_extensions, link_of
 from eaglegate_release import ReleaseError, check_entry, deliver, release_params
-from eaglegate_quarantine import (RAW_CAPTURE_BYTES, RECENT_COUNT, RECENT_PACKET, QuarantineWriter, StatusPublisher,
+from eaglegate_quarantine import (RECENT_COUNT, RECENT_PACKET, QuarantineWriter, StatusPublisher,
                                   header_of, recent_items, utc_now)
 from eaglegate_rules_error import RulesError
+from eaglegate_rules_audit import rules_changes, summary
 from eaglegate_rules_parser import TOP_LEVEL_KEYS, parse_rules
 from eaglegate_rules_signing import RulesSigner
 from eaglegate_rules_store import RulesStore
@@ -160,6 +162,8 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.rules_store = None            # created on first use, once the scope is final
         self.signer = RulesSigner()        # reads EAGLEGATE_RULES_KEY; disabled when unset
         self.rules_signed = False          # the running set was verified, or signed when applied
+        self.rules_text = None             # text of the running set (None: built-in deny-all), for audit diffs
+        self.load_error_audited = None     # last load failure written to the audit stream (no repeats)
         self.rejected = 0
         self.rejected_by_stage = {RULE: 0, DEFAULT: 0, ERROR: 0, STRUCTURAL: 0, LINK: 0}
         self.discarded_bytes = 0
@@ -170,6 +174,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
         self.untrusted_cause = None        # the rejection that made it untrusted, for the page
         self.trust_restores = 0
         self.released = 0                  # quarantined packets an admin sent on (RELEASE)
+        self.monitored = 0                 # delivered packets the rules would have denied (monitor)
         self.extensions = {}               # section -> Extension, found when the rules load
         self.nonces = NonceLog()           # admin requests already used
         self.admin_actions = deque(maxlen=RECENT_ADMIN_ACTIONS)
@@ -217,9 +222,18 @@ class EaglegateFirewallProtocol(LengthProtocol):
             except Exception as error:  # an exception here would disconnect COSMOS
                 verdict = Verdict(action="DENY", stage=ERROR, detail=f"rules engine error: {error}",
                                   rules_version=ruleset.version, rules_sha256=ruleset.sha256)
-            self.traffic.record(data, verdict.action == "ALLOW")
+            if verdict.action != "ALLOW" and ruleset.settings.get("enforcement") == "monitor":
+                # Monitor mode: deliver it, but record exactly what enforce would have done
+                observed = (replace(verdict, monitor=True, observed=()), *verdict.observed)
+                delivered = True
+            else:
+                observed = verdict.observed  # monitored rules that fired on the way
+                delivered = verdict.action == "ALLOW"
+            self.traffic.record(data, delivered)
             self.spike.packet()
-            if verdict.action == "ALLOW":
+            if delivered:
+                if observed:
+                    self._observe(observed, data, link)
                 self.first_packet_decided = True
                 self.status_due = True  # PACKETS and ALLOWED changed; published at most once a second
                 return (data, extra)
@@ -269,6 +283,18 @@ class EaglegateFirewallProtocol(LengthProtocol):
                 return
         self._publish_status_if_due()
 
+    def _observe(self, observed, data, link=None):
+        """A delivered packet the rules would have denied (monitor mode or a
+        monitored rule): count it and quarantine it as not releasable. One entry
+        per packet, for the first would-be denial; the others count as rule hits."""
+        first = observed[0]
+        self.monitored += 1
+        self.spike.rejection(first)  # hostile traffic is a spike whether or not it was withheld
+        more = f" (and {len(observed) - 1} more monitored rule(s))" if len(observed) > 1 else ""
+        Logger.info(f"{self._name()} firewall delivered {_apid(data)} that it would deny: "
+                    f"{first.reason()}{more} (total {self.monitored})")
+        self._quarantine(first, data, link)
+
     def _record_rejection(self, verdict, data, link=None):
         self.rejected += 1
         self.rejected_by_stage[verdict.stage] = self.rejected_by_stage.get(verdict.stage, 0) + 1
@@ -279,7 +305,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
 
     def _discard_all(self, data, extra):
         """Drop new and buffered bytes without framing them (logged once, in _reject).
-        The first RAW_CAPTURE_BYTES of the connection are kept as evidence."""
+        The first quarantine_raw_capture_bytes of the connection are kept as evidence."""
         dropped = self.data + data
         self.data = b""
         self.discard_untrusted(dropped)
@@ -296,6 +322,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "stage": verdict.stage,
             "rule_id": verdict.rule_id,
             "rule_type": verdict.rule_type,
+            "monitor": verdict.monitor,
             "apid": f"0x{header.apid:03X}" if header else None,
             "seq_count": header.seq_count if header else None,
             "packet_type": ("CMD" if header.packet_type else "TLM") if header else None,
@@ -318,6 +345,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
     def _quarantine_writer(self):
         if self.quarantine is None:
             self.quarantine = QuarantineWriter(self.scope, self._name())
+        self.quarantine.settings = self.ruleset.settings  # retention follows the running rules
         return self.quarantine
 
     # ---- Extension API -------------------------------------------------------
@@ -349,10 +377,11 @@ class EaglegateFirewallProtocol(LengthProtocol):
 
     def discard_untrusted(self, dropped):
         """Count bytes dropped because the connection is untrusted, keeping the
-        first RAW_CAPTURE_BYTES of the connection as evidence."""
+        first quarantine_raw_capture_bytes of the connection as evidence."""
         self.discarded_bytes += len(dropped)
-        if dropped and self.untrusted_captured < RAW_CAPTURE_BYTES:
-            kept = dropped[:RAW_CAPTURE_BYTES - self.untrusted_captured]
+        capture = self._quarantine_writer().raw_capture_bytes
+        if dropped and self.untrusted_captured < capture:
+            kept = dropped[:capture - self.untrusted_captured]
             self.untrusted_captured += len(kept)
             ruleset = self.ruleset
             self._quarantine(Verdict(
@@ -577,6 +606,9 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "DENIED_LINK": _u32(self.rejected_by_stage[LINK]),
             "TRUST_RESTORES": _u32(self.trust_restores),
             "RELEASED": _u32(self.released),
+            "MONITORED": _u32(self.monitored),
+            "ENFORCEMENT": "MONITOR" if self.ruleset.settings.get("enforcement") == "monitor" else "ENFORCE",
+            "MONITOR_RULES": min(len([r for r in self.ruleset.rules if r.monitor]), 0xFFFF),
             **self.spike.status(),
             "PACKETS": _u32(self.traffic.packets),
             "ALLOWED": _u32(self.traffic.allowed),
@@ -635,8 +667,8 @@ class EaglegateFirewallProtocol(LengthProtocol):
             self.release(_optional(cmd_args[0]) if cmd_args else None)
             return True
         if name == "RELOAD_RULES":
-            base_sha256, pending_sha256 = (list(map(_optional, cmd_args)) + [None, None])[:2]
-            self.apply_pending(base_sha256, pending_sha256)
+            base_sha256, pending_sha256, request_sha256 = (list(map(_optional, cmd_args)) + [None] * 3)[:3]
+            self.apply_pending(base_sha256, pending_sha256, request_sha256)
             # Runs on the interface's command thread: leave publishing the new
             # RULES_VERSION to the read thread, so only one thread writes the packet
             self.status_due = True
@@ -664,9 +696,18 @@ class EaglegateFirewallProtocol(LengthProtocol):
                                  f"the running version {self.ruleset.version}; refusing a rollback. "
                                  "Restore older rules from the EagleGate Firewall page instead")
         except Exception as error:
-            return self._rules_failed(error)
-        self._swap(new_ruleset, source)
+            self._rules_failed(error)
+            if self.rules_error != self.load_error_audited:  # not once per reconnect attempt
+                self.load_error_audited = self.rules_error
+                self.record_admin_action("LOAD_RULES", False, f"rules not loaded: {self.rules_error}; "
+                                         f"keeping version {self.ruleset.version}")
+            return False
+        self.load_error_audited = None
+        previous = (self.ruleset, self.rules_text)
+        changed = self._swap(new_ruleset, source, text)
         self.rules_signed = self.signer.enabled
+        if changed:
+            self._audit_rules("LOAD_RULES", previous, f"loaded the {source} rules")
         return True
 
     def _check_signature(self, text, signature):
@@ -682,10 +723,25 @@ class EaglegateFirewallProtocol(LengthProtocol):
                              "(or signed with a different key). Re-apply the rules from the "
                              "EagleGate Firewall page")
 
-    def apply_pending(self, base_sha256=None, pending_sha256=None):
+    def apply_pending(self, base_sha256=None, pending_sha256=None, request_sha256=None):
         """Validate rules_pending.json and make it the running and startup set.
         Returns True on success; on failure nothing changes and the error is recorded.
-        With no pending file this re-reads the startup set, like a reconnect."""
+        With no pending file this re-reads the startup set, like a reconnect.
+
+        request_sha256: the change request (requests/reload_rules.json, an admin
+        request with the reason, bound to pending_sha256) the EagleGate page
+        uploads. Optional, so the apply procedure keeps working; either way the
+        outcome goes to the audit stream (decision C13)."""
+        request = None
+        if request_sha256:
+            try:
+                request = self.admin_request("reload_rules", request_sha256)
+                if request.params.get("pending_sha256") != pending_sha256:
+                    raise RequestError("the change request is for a different rules file")
+            except RequestError as error:
+                self._rules_failed(RulesError(f"change request refused: {error}"))
+                return self.record_admin_action("RELOAD_RULES", False, self.rules_error,
+                                                request, request_sha256=request_sha256)
         try:
             text = self.store().read_pending()
             if text is None:
@@ -703,7 +759,10 @@ class EaglegateFirewallProtocol(LengthProtocol):
                                  f"running is {self.ruleset.sha256[:12]} version {self.ruleset.version}); "
                                  "reload and apply your changes again")
         except Exception as error:
-            return self._rules_failed(error)
+            self._rules_failed(error)
+            return self.record_admin_action("RELOAD_RULES", False, f"rules not applied: {self.rules_error}; "
+                                            f"keeping version {self.ruleset.version}", request,
+                                            pending_sha256=pending_sha256 or "")
         signature = self.signer.sign(self.store().keys["active"], text) if self.signer.usable else None
         if self.store().save_active(text, new_ruleset.version, new_ruleset.sha256, signature):
             self.persist_error = None
@@ -711,9 +770,25 @@ class EaglegateFirewallProtocol(LengthProtocol):
             # Running now, but a restart would bring back the previous set: say so loudly
             self.persist_error = f"could not save {self.store().keys['active']}: {self.store().last_error}"
             Logger.error(f"{self._name()} firewall: {self.persist_error}")
-        self._swap(new_ruleset, "pending")
+        previous = (self.ruleset, self.rules_text)
+        changed = self._swap(new_ruleset, "pending", text)
         self.rules_signed = signature is not None
+        self._audit_rules("RELOAD_RULES", previous,
+                          "applied new rules" if changed else "re-applied the running rules", request)
         return True
+
+    def _audit_rules(self, action, previous, what, request=None):
+        """Write a rules change to the audit stream: versions, hashes and what changed."""
+        old_ruleset, old_text = previous
+        changes = rules_changes(old_text, self.rules_text)
+        new = self.ruleset
+        self.record_admin_action(
+            action, True,
+            f"{what}: version {old_ruleset.version} -> {new.version} (sha256 {new.sha256[:12]}): {summary(changes)}",
+            request, version=new.version, sha256=new.sha256, previous_version=old_ruleset.version,
+            previous_sha256=old_ruleset.sha256, source=self.rules_source or "", changes=changes,
+            enforcement=new.settings.get("enforcement", "enforce"), signed=self.rules_signed,
+            persist_error=self.persist_error or "")
 
     def _rules_failed(self, error):
         self.rules_error = f"{type(error).__name__}: {error}"
@@ -725,17 +800,19 @@ class EaglegateFirewallProtocol(LengthProtocol):
         )
         return False
 
-    def _swap(self, new_ruleset, source):
+    def _swap(self, new_ruleset, source, text=None):
+        """Make new_ruleset the running set. Returns True when it changed."""
         self.rules_error = None
         self.rules_error_at = None
         self.rules_source = source
         if new_ruleset.sha256 == self.ruleset.sha256:
             # Same text: keep the running set, so what the sequence and rate rules
             # remember survives reconnects (a reset would let one replay through)
-            return
+            return False
         old_version = self.ruleset.version
         # A single assignment: read_data sees the old or the new set, never a mix
         self.ruleset = new_ruleset
+        self.rules_text = text
         # What was normal under the old rules says nothing about the new ones; start
         # strict (more warnings, never fewer), and say so if a spike follows
         self.spike.rules_changed(new_ruleset.version)
@@ -744,6 +821,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             f"{self._name()} firewall: rules version {old_version} -> {new_ruleset.version} "
             f"from {source} ({len(new_ruleset.rules)} active rules, sha256 {new_ruleset.sha256[:12]})"
         )
+        return True
 
     def _extensions(self):
         """Extensions offered by the protocols BEFORE this one on the interface
@@ -785,6 +863,7 @@ class EaglegateFirewallProtocol(LengthProtocol):
             "untrusted_cause": self.untrusted_cause,
             "trust_restores": self.trust_restores,
             "released": self.released,
+            "monitored": self.monitored,
             "connection_id": self.connection_id,
             "interface_warning": self.interface_warning,
             "api_version": FIREWALL_API_VERSION,

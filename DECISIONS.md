@@ -153,6 +153,49 @@ Each entry covers:
   - Bytes discarded from an already untrusted connection don't count as rejections; `CONNECTION_UNTRUSTED` is RED on its own already.
   - If rejections stay high for good (for example a rule that is too strict), the state stays raised until the cause is fixed or the settings are changed. This is by design.
 
+### C12. Monitor mode, for a whole rule set or one rule (2026-11-16)
+- **Decision:**
+  - The setting `enforcement` is `enforce` (default) or `monitor`. In monitor, every packet the rules would deny is delivered.
+  - A DENY rule may have `"monitor": true`. When it fires, its denial is only recorded, and the rules below it decide the packet.
+  - Every would-be denial is:
+    - quarantined in the framed stream with `monitor: true`, never releasable (the packet was delivered);
+    - logged at INFO, and reasoned "WOULD DENY (monitor) by …";
+    - counted as `MONITORED`, and counted by the spike detector.
+  - `FIREWALL_STATUS ENFORCEMENT` is ENFORCE (GREEN) or MONITOR (YELLOW), so switching a whole set to monitor raises a COSMOS notification. `MONITOR_RULES` counts monitored rules. The page shows a banner, and the apply dialog warns.
+  - Monitor shows exactly what enforce would do:
+    - a would-be denial never teaches a stateful rule (sequence, rate), just as an enforced denial doesn't;
+    - in monitor mode, a first packet that would be denied doesn't mark the connection untrusted.
+  - **Unchanged:** the hardcoded structural check, the built-in deny-all set (used when no rules load), and an extension's own checks (SDLS has its own monitor mode).
+- **Why:** without it, every new rule set goes straight to blocking, and one wrong rule drops live telemetry. This is the standard way to roll out firewall rules safely.
+
+### C13. Every rules change is in the audit stream (2026-11-16)
+- **Decision:**
+  - The firewall writes an audit entry when:
+    - `RELOAD_RULES` applies, re-applies or refuses a rule set;
+    - a different rule set is loaded on connect (`LOAD_RULES`, including the first load at start-up);
+    - a load fails. That entry is written once per distinct error, not on every reconnect attempt.
+  - **Each entry holds:**
+    - the old and new version and sha256, the source, and the enforcement mode;
+    - whether the set is signed, and any persist error;
+    - a summary of what changed (`eaglegate_rules_audit.py`): rules added, removed, changed, disabled, enabled or newly monitored; reordering; the default action; settings; extension sections.
+  - **The change reason:** the EagleGate page requires one when applying. It sends `requests/reload_rules.json`, an admin request (C5 pattern) bound to the pending file's sha256, as a third `RELOAD_RULES` argument. A request for a different file, or one that is used, expired or tampered with, refuses the apply. The apply procedure sends no request and is audited without a reason.
+- **Why:** a firewall's audit trail must cover changes to its policy, not only the actions around it. This narrows R5.4: the reason and the "requested by" name the page reports are recorded, and COSMOS's own log still has the authenticated user of the upload.
+
+### C14. Retention is an admin setting; admins can export (2026-11-16)
+- **Decision:**
+  - **Retention settings in the rules file** (defaults are the old constants):
+    - `quarantine_max_entries` (10000; 100–100000)
+    - `quarantine_raw_max_entries` (1000)
+    - `quarantine_raw_capture_bytes` (4096; 256–65536)
+    - `quarantine_max_age_days` (0 = no age limit; trimmed with `XTRIM MINID ~` at most once a minute)
+    - `audit_max_entries` (10000; 1000–1000000; the audit log is never trimmed by age)
+  - The review microservice no longer caps the audit stream itself; only the firewall, which knows the setting, trims it.
+  - **Export:** `GET /eaglegate-quarantine/export` (admins only, like C5) downloads up to 10000 entries that match the current filters, as:
+    - JSON (every field, bytes as hex, metadata naming the exporter, filters and audit id, and `complete`), or
+    - classic pcap (link type USER0 = 147; Wireshark can map it to its `ccsds` dissector). Truncated raw entries keep their original length.
+  - Every export writes an `EXPORT` audit entry: who, format, count and filters.
+- **Why:** principle P1 (a default plus an admin setting instead of constants), and incident response needs the evidence outside COSMOS, with a record of who took it.
+
 ## Rules editor
 
 ### R1. Supports Core and Enterprise (2026-10-17)

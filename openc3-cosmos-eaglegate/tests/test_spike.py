@@ -199,7 +199,7 @@ def test_the_firewall_raises_the_alarm(valkey, log):
     # A notification with the reason; COSMOS raises the alert itself from SPIKE_STATE
     [(level, text, kind)] = [m for m in log if len(m) == 3]
     assert (level, kind) == ("ERROR", "notification") and "rejections SPIKE: 40 rejections" in text
-    [audit] = valkey.stream("_AUDIT__EAGLEGATE_INT")
+    [audit] = valkey.audit("SPIKE")
     assert (audit["action"], audit["state"], audit["previous_state"]) == ("SPIKE", "SPIKE", "NORMAL")
     assert iface.details()["read_protocols"][0]["firewall"]["spike"]["state"] == "SPIKE"
     for step in (2, 3, 4):

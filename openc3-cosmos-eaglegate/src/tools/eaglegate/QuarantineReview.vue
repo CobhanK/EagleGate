@@ -39,6 +39,13 @@
           @click="refresh"
           >Refresh</v-btn
         >
+        <v-btn
+          variant="text"
+          prepend-icon="mdi-download"
+          :disabled="!loaded"
+          @click="openExport"
+          >Export…</v-btn
+        >
       </v-card-title>
       <v-card-text>
         <v-row dense>
@@ -167,6 +174,15 @@
           <v-chip size="x-small" :color="stageColor(item.stage)">{{
             safeText(item.stage)
           }}</v-chip>
+          <v-chip
+            v-if="item.monitor"
+            size="x-small"
+            variant="outlined"
+            color="warning"
+            class="ml-1"
+            title="Monitor mode: delivered, only recorded"
+            >monitor</v-chip
+          >
         </template>
         <template #item.rule_id="{ item }">
           <code>{{ safeText(item.rule_id || item.layer || '-', 64) }}</code>
@@ -388,6 +404,48 @@
       </v-card>
     </v-dialog>
 
+    <!-- Export: a file download, recorded in the audit log -->
+    <v-dialog v-model="exporter.open" max-width="560">
+      <v-card>
+        <v-card-title>Export quarantine entries</v-card-title>
+        <v-card-text>
+          <p class="mb-2">
+            The newest entries of the
+            {{ filters.stream === 'raw' ? 'raw and link' : 'rule denial' }}
+            stream that match the current filters, with their bytes.
+          </p>
+          <v-radio-group v-model="exporter.format" inline hide-details>
+            <v-radio label="JSON (every field, bytes as hex)" value="json" />
+            <v-radio label="pcap (for Wireshark)" value="pcap" />
+          </v-radio-group>
+          <v-text-field
+            v-model="exporter.limit"
+            type="number"
+            :min="1"
+            :max="maxExport"
+            label="Entries (at most 10000)"
+            density="compact"
+            class="mt-2"
+          />
+          <div v-if="exporter.format === 'pcap'" class="text-caption mb-2">
+            Link type USER0 (147). In Wireshark: Preferences, Protocols,
+            DLT_USER, map User 0 to the "ccsds" dissector.
+          </div>
+          <v-alert type="info" variant="tonal" density="compact">
+            The file holds raw packet bytes from the link: treat it as
+            sensitive. The export is recorded in the audit log.
+          </v-alert>
+        </v-card-text>
+        <v-card-actions>
+          <v-spacer />
+          <v-btn variant="text" @click="exporter.open = false">Cancel</v-btn>
+          <v-btn color="primary" :loading="exporter.busy" @click="doExport"
+            >Download</v-btn
+          >
+        </v-card-actions>
+      </v-card>
+    </v-dialog>
+
     <!-- Release: an admin request to the firewall -->
     <v-dialog v-model="release.open" max-width="640">
       <v-card v-if="release.entry">
@@ -477,6 +535,7 @@ import {
   safeText,
 } from './quarantine.js'
 import {
+  exportEntries,
   getEntry,
   listEntries,
   releaseEntry,
@@ -485,6 +544,7 @@ import {
 import { userName } from '../../services/rulesStore.js'
 
 const LIMIT_KEY = 'eaglegate.quarantine.limit'
+const MAX_EXPORT = 10000
 const REFRESH_MS = 10000
 
 function emptyFilters(limit) {
@@ -540,6 +600,8 @@ export default {
         busy: false,
       },
       release: { open: false, entry: null, reason: '', busy: false },
+      exporter: { open: false, format: 'json', limit: 1000, busy: false },
+      maxExport: MAX_EXPORT,
       headers: [
         { title: 'Time (UTC)', key: 'time' },
         { title: 'Stage', key: 'stage' },
@@ -734,7 +796,38 @@ export default {
         400,
       )
     },
+    openExport() {
+      this.exporter = {
+        open: true,
+        format: this.exporter.format,
+        limit: this.filters.limit,
+        busy: false,
+      }
+    },
+    async doExport() {
+      this.exporter.busy = true
+      try {
+        const limit = Math.min(
+          MAX_EXPORT,
+          Math.max(1, Number.parseInt(this.exporter.limit, 10) || 1),
+        )
+        const params = {
+          ...listParams(this.interfaceName, this.filters),
+          limit: String(limit),
+          format: this.exporter.format,
+        }
+        const name = await exportEntries(params)
+        this.$notify.normal({ title: 'Export downloaded', body: name })
+        this.exporter.open = false
+      } catch (error) {
+        this.$notify.serious({ title: 'Export failed', body: error.message })
+      } finally {
+        this.exporter.busy = false
+      }
+    },
     releaseNote(entry) {
+      if (entry.monitor)
+        return 'Recorded in monitor mode: the packet was delivered, so there is nothing to release.'
       if (entry.stream !== 'quarantine')
         return 'Raw and link rejections are kept for forensics only and cannot be released.'
       if (entry.truncated)

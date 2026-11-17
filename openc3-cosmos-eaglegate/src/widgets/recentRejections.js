@@ -56,6 +56,7 @@ export function parseRecent(json) {
       stage: text(r.stage, 12),
       rule_id: text(r.rule_id, 64),
       rule_type: text(r.rule_type, 32),
+      monitor: r.monitor === true,
       layer: text(r.layer, 32),
       apid: text(r.apid, 8),
       packet_type: text(r.packet_type, 3),

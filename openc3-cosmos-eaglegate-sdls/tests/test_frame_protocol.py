@@ -329,7 +329,7 @@ def test_reset_replay_after_the_spacecraft_lost_its_counters(valkey):
     assert action["previous"]["7"]["value"] == "5000"
     iface.chunks = rebooted.add(hk(3)).cadus()
     assert buffers(read_all(iface)) == [hk(3)]
-    [audit] = valkey.stream("_AUDIT__" + IFACE)
+    [audit] = [a for a in valkey.stream("_AUDIT__" + IFACE) if a["action"] != "LOAD_RULES"]
     assert audit["action"] == "RESET_REPLAY" and audit["spi"] == "7"
     assert sdls.status_items()["REPLAY_RESETS"] == 1
 

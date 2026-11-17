@@ -80,6 +80,54 @@ export async function setReview(iface, stream, ids, state, note, requestedBy) {
   }
 }
 
+// The file name COSMOS's answer names (Content-Disposition), or a default
+function fileName(headers, fallback) {
+  const found = /filename="([A-Za-z0-9_.-]+)"/.exec(
+    headers?.['content-disposition'] || '',
+  )
+  return found ? found[1] : fallback
+}
+
+// An export (JSON or pcap) as a browser download; resolves with the file name.
+// The review service records every export in the audit log (decision C14).
+export async function exportEntries(params) {
+  let response
+  try {
+    response = await Api.get(`${PREFIX}/export`, {
+      params,
+      headers: headers(),
+      responseType: 'blob',
+    })
+  } catch (error) {
+    // Error answers arrive as a Blob too: read the JSON message out of it
+    const data = error?.response?.data
+    if (data instanceof Blob) {
+      try {
+        error.response.data = JSON.parse(await data.text())
+      } catch {
+        // not JSON; failure() gives a generic message
+      }
+    }
+    throw failure(error)
+  }
+  const name = fileName(
+    response.headers,
+    `eaglegate-export.${params.format === 'pcap' ? 'pcap' : 'json'}`,
+  )
+  const url = URL.createObjectURL(response.data)
+  try {
+    const link = document.createElement('a')
+    link.href = url
+    link.download = name
+    document.body.appendChild(link)
+    link.click()
+    link.remove()
+  } finally {
+    setTimeout(() => URL.revokeObjectURL(url), 10000)
+  }
+  return name
+}
+
 // RELEASE through the firewall: resolves with its answer { ok, detail, ... }
 export function releaseEntry(iface, entry, reason) {
   return adminAction(iface, 'release', 'RELEASE', reason, {

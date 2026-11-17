@@ -70,6 +70,9 @@ def check_entry(fields, entry_id, interface_name, digest):
     if fields is None:
         raise ReleaseError(f"quarantine entry {entry_id} does not exist (never stored, or already "
                            "trimmed from the capped stream)")
+    if _flag(fields, "monitor"):
+        raise ReleaseError(f"quarantine entry {entry_id} was recorded in monitor mode: the packet was "
+                           "delivered already, so there is nothing to release")
     if not _flag(fields, "releasable"):
         raise ReleaseError(f"quarantine entry {entry_id} is not releasable (stage {_text(fields, 'stage')})")
     if _flag(fields, "truncated"):
